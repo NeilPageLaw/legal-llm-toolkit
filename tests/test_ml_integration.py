@@ -168,3 +168,63 @@ def test_benchmark_with_local_model(tiny_model):
     result = suite.results[0]
     assert result.samples_evaluated == 1
     assert isinstance(result.per_sample_results[0]["response"], str)
+
+
+def test_cli_train_and_evaluate(tiny_model, tmp_path, capsys):
+    from legalkit.cli import main
+
+    data = tmp_path / "train.jsonl"
+    data.write_text("\n".join(json.dumps({"text": text}) for text in CORPUS))
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "lora_r": 4,
+                "lora_alpha": 8,
+                "bf16": False,
+                "gradient_checkpointing": False,
+                "batch_size": 2,
+                "gradient_accumulation_steps": 1,
+                "max_seq_length": 64,
+                "save_steps": 1000,
+            }
+        )
+    )
+    output = tmp_path / "model"
+    code = main(
+        [
+            "train",
+            str(data),
+            "-m",
+            tiny_model,
+            "--method",
+            "lora",
+            "--epochs",
+            "1",
+            "--config",
+            str(config),
+            "-o",
+            str(output),
+            "--merge",
+        ]
+    )
+    assert code == 0, capsys.readouterr().err
+    assert (output / "training_config.json").exists()
+
+    results = tmp_path / "results.json"
+    code = main(
+        [
+            "evaluate",
+            str(output),
+            "--tasks",
+            "contract_qa",
+            "--max-samples",
+            "1",
+            "--max-new-tokens",
+            "3",
+            "-o",
+            str(results),
+        ]
+    )
+    assert code == 0, capsys.readouterr().err
+    assert json.loads(results.read_text())["results"][0]["task"] == "contract_qa"
