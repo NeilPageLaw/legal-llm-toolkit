@@ -101,4 +101,4 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --cov=legalkit --cov-report=term-missing"
+markers = ["ml: end-to-end tests that need the training extras (torch, transformers, peft, trl)"]

@@ -633,7 +633,13 @@ class LegalBenchmark:
         """Generate a response greedily, so results are reproducible."""
         import torch
 
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        encoded = tokenizer(prompt, return_tensors="pt")
+        # Some tokenizers also return token_type_ids, which causal LMs reject.
+        inputs = {
+            key: value.to(model.device)
+            for key, value in encoded.items()
+            if key in ("input_ids", "attention_mask")
+        }
         pad_token_id = tokenizer.pad_token_id
         if pad_token_id is None:
             pad_token_id = tokenizer.eos_token_id

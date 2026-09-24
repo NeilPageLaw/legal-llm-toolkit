@@ -2,10 +2,16 @@
 Adapter configurations for LoRA and QLoRA fine-tuning.
 """
 
-from legalkit.finetune.config import LegalTrainingConfig
+import re
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from legalkit.finetune.config import LegalTrainingConfig
+
+LLAMA_STYLE_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
 
-def create_lora_config(config: LegalTrainingConfig):
+def create_lora_config(config: "LegalTrainingConfig"):
     """
     Create LoRA configuration from training config.
 
@@ -17,8 +23,10 @@ def create_lora_config(config: LegalTrainingConfig):
     """
     try:
         from peft import LoraConfig, TaskType
-    except ImportError:
-        raise ImportError("Install peft: pip install peft")
+    except ImportError as e:
+        raise ImportError(
+            "Install the training extras: pip install 'legal-llm-toolkit[train]'"
+        ) from e
 
     return LoraConfig(
         r=config.lora_r,
@@ -30,44 +38,33 @@ def create_lora_config(config: LegalTrainingConfig):
     )
 
 
-def create_qlora_config(config: LegalTrainingConfig, compute_dtype: str = "float16"):
+def create_qlora_config(config: "LegalTrainingConfig", compute_dtype: str | None = None):
     """
     Create QLoRA (4-bit) configuration.
 
     Args:
         config: LegalTrainingConfig instance
-        compute_dtype: Computation dtype
+        compute_dtype: Computation dtype (default: config.bnb_4bit_compute_dtype)
 
     Returns:
         Tuple of (LoraConfig, BitsAndBytesConfig)
     """
     try:
         import torch
-        from peft import LoraConfig, TaskType
         from transformers import BitsAndBytesConfig
     except ImportError as e:
-        raise ImportError(f"Missing dependency: {e}")
-
-    lora_config = LoraConfig(
-        r=config.lora_r,
-        lora_alpha=config.lora_alpha,
-        lora_dropout=config.lora_dropout,
-        target_modules=config.lora_target_modules,
-        bias="none",
-        task_type=TaskType.CAUSAL_LM,
-    )
+        raise ImportError("Install the QLoRA extras: pip install 'legal-llm-toolkit[qlora]'") from e
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type=config.bnb_4bit_quant_type,
-        bnb_4bit_compute_dtype=getattr(torch, compute_dtype),
+        bnb_4bit_compute_dtype=getattr(torch, compute_dtype or config.bnb_4bit_compute_dtype),
         bnb_4bit_use_double_quant=config.use_nested_quant,
     )
+    return create_lora_config(config), bnb_config
 
-    return lora_config, bnb_config
 
-
-def get_target_modules_for_model(model_name: str) -> list[str]:
+def get_target_modules_for_model(model_name: str) -> list[str] | str:
     """
     Get recommended LoRA target modules for a model.
 
@@ -75,13 +72,20 @@ def get_target_modules_for_model(model_name: str) -> list[str]:
         model_name: Model name or path
 
     Returns:
-        List of module names to target
+        List of module names to target, or "all-linear" (every linear layer
+        except the output head) for architectures not listed here
     """
     model_lower = model_name.lower()
 
-    # Llama, Mistral, and similar architectures
-    if any(x in model_lower for x in ["llama", "mistral", "mixtral", "qwen"]):
-        return ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    # Llama, Mistral, Qwen, Gemma and similar architectures
+    if any(
+        x in model_lower for x in ["llama", "mistral", "mixtral", "qwen", "gemma", "yi-", "smollm"]
+    ):
+        return list(LLAMA_STYLE_MODULES)
+
+    # Phi-3 and later fuse the attention and MLP projections
+    if re.search(r"phi-?[34]", model_lower):
+        return ["qkv_proj", "o_proj", "gate_up_proj", "down_proj"]
 
     # Falcon
     if "falcon" in model_lower:
@@ -95,8 +99,27 @@ def get_target_modules_for_model(model_name: str) -> list[str]:
     if any(x in model_lower for x in ["neox", "pythia"]):
         return ["query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"]
 
-    # Default - common attention modules
-    return ["q_proj", "k_proj", "v_proj", "o_proj"]
+    # GPT-2
+    if "gpt2" in model_lower:
+        return ["c_attn", "c_proj", "c_fc"]
+
+    return "all-linear"
+
+
+def estimate_parameters(model_name: str) -> int | None:
+    """
+    Estimate a model's parameter count from its name, e.g. "Llama-3.1-8B" or
+    "Mixtral-8x7B". Mixture-of-experts models are counted as experts x size,
+    an over-estimate.
+
+    Returns:
+        Parameter count, or None if the name gives no size
+    """
+    match = re.search(r"(?<![\d.])(?:(\d+)x)?(\d+(?:\.\d+)?)b(?![a-z])", model_name.lower())
+    if match is None:
+        return None
+    experts = int(match.group(1) or 1)
+    return int(experts * float(match.group(2)) * 1_000_000_000)
 
 
 def estimate_memory_usage(
@@ -104,9 +127,12 @@ def estimate_memory_usage(
     method: str = "qlora",
     batch_size: int = 4,
     max_seq_length: int = 2048,
-) -> dict:
+) -> dict[str, Any]:
     """
     Estimate VRAM usage for training.
+
+    A rough guide for choosing hardware, not a guarantee: real usage depends
+    on the architecture, optimizer and sequence packing.
 
     Args:
         model_name: Model name or path
@@ -117,48 +143,33 @@ def estimate_memory_usage(
     Returns:
         Dictionary with memory estimates
     """
-    # Rough parameter counts for common models
-    model_params = {
-        "7b": 7_000_000_000,
-        "13b": 13_000_000_000,
-        "34b": 34_000_000_000,
-        "70b": 70_000_000_000,
-    }
-
-    # Try to infer model size
-    model_lower = model_name.lower()
-    params = None
-    for size, count in model_params.items():
-        if size in model_lower:
-            params = count
-            break
-
+    params = estimate_parameters(model_name)
     if params is None:
-        return {"error": "Could not determine model size"}
+        return {"error": "Could not determine model size from its name"}
 
     # Memory estimates (very rough)
     if method == "qlora":
         # 4-bit quantization: ~0.5 bytes per param
         model_memory_gb = (params * 0.5) / (1024**3)
         # Plus gradients and optimizer states for LoRA params only
-        lora_overhead_gb = 2.0  # Rough estimate
+        training_overhead_gb = 2.0
     elif method == "lora":
-        # FP16: ~2 bytes per param
+        # 16-bit weights: ~2 bytes per param
         model_memory_gb = (params * 2) / (1024**3)
-        lora_overhead_gb = 4.0
+        training_overhead_gb = 4.0
     else:  # full
-        # FP16 with gradients: ~4 bytes per param
-        model_memory_gb = (params * 4) / (1024**3)
-        lora_overhead_gb = 0
+        # 16-bit weights and gradients plus 32-bit Adam states: ~16 bytes per param
+        model_memory_gb = (params * 16) / (1024**3)
+        training_overhead_gb = 0.0
 
     # Activation memory (rough estimate)
     activation_memory_gb = (batch_size * max_seq_length * 4096 * 4) / (1024**3)
 
-    total_gb = model_memory_gb + lora_overhead_gb + activation_memory_gb
+    total_gb = model_memory_gb + training_overhead_gb + activation_memory_gb
 
     return {
         "model_memory_gb": round(model_memory_gb, 1),
-        "training_overhead_gb": round(lora_overhead_gb, 1),
+        "training_overhead_gb": round(training_overhead_gb, 1),
         "activation_memory_gb": round(activation_memory_gb, 1),
         "total_estimated_gb": round(total_gb, 1),
         "recommended_gpu": _recommend_gpu(total_gb),
@@ -178,6 +189,6 @@ def _recommend_gpu(memory_gb: float) -> str:
     elif memory_gb <= 48:
         return "A40/A6000 (48GB)"
     elif memory_gb <= 80:
-        return "A100 (80GB)"
+        return "A100/H100 (80GB)"
     else:
         return "Multiple GPUs required"
