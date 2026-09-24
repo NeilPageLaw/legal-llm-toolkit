@@ -2,17 +2,16 @@
 Adapter configurations for LoRA and QLoRA fine-tuning.
 """
 
-from typing import List, Optional
 from legalkit.finetune.config import LegalTrainingConfig
 
 
 def create_lora_config(config: LegalTrainingConfig):
     """
     Create LoRA configuration from training config.
-    
+
     Args:
         config: LegalTrainingConfig instance
-        
+
     Returns:
         LoraConfig for PEFT
     """
@@ -20,7 +19,7 @@ def create_lora_config(config: LegalTrainingConfig):
         from peft import LoraConfig, TaskType
     except ImportError:
         raise ImportError("Install peft: pip install peft")
-    
+
     return LoraConfig(
         r=config.lora_r,
         lora_alpha=config.lora_alpha,
@@ -31,27 +30,24 @@ def create_lora_config(config: LegalTrainingConfig):
     )
 
 
-def create_qlora_config(
-    config: LegalTrainingConfig,
-    compute_dtype: str = "float16"
-):
+def create_qlora_config(config: LegalTrainingConfig, compute_dtype: str = "float16"):
     """
     Create QLoRA (4-bit) configuration.
-    
+
     Args:
         config: LegalTrainingConfig instance
         compute_dtype: Computation dtype
-        
+
     Returns:
         Tuple of (LoraConfig, BitsAndBytesConfig)
     """
     try:
+        import torch
         from peft import LoraConfig, TaskType
         from transformers import BitsAndBytesConfig
-        import torch
     except ImportError as e:
         raise ImportError(f"Missing dependency: {e}")
-    
+
     lora_config = LoraConfig(
         r=config.lora_r,
         lora_alpha=config.lora_alpha,
@@ -60,48 +56,45 @@ def create_qlora_config(
         bias="none",
         task_type=TaskType.CAUSAL_LM,
     )
-    
+
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type=config.bnb_4bit_quant_type,
         bnb_4bit_compute_dtype=getattr(torch, compute_dtype),
         bnb_4bit_use_double_quant=config.use_nested_quant,
     )
-    
+
     return lora_config, bnb_config
 
 
-def get_target_modules_for_model(model_name: str) -> List[str]:
+def get_target_modules_for_model(model_name: str) -> list[str]:
     """
     Get recommended LoRA target modules for a model.
-    
+
     Args:
         model_name: Model name or path
-        
+
     Returns:
         List of module names to target
     """
     model_lower = model_name.lower()
-    
+
     # Llama, Mistral, and similar architectures
     if any(x in model_lower for x in ["llama", "mistral", "mixtral", "qwen"]):
-        return [
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj"
-        ]
-    
+        return ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
     # Falcon
     if "falcon" in model_lower:
         return ["query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"]
-    
+
     # MPT
     if "mpt" in model_lower:
         return ["Wqkv", "out_proj", "up_proj", "down_proj"]
-    
+
     # GPT-NeoX / Pythia
     if any(x in model_lower for x in ["neox", "pythia"]):
         return ["query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"]
-    
+
     # Default - common attention modules
     return ["q_proj", "k_proj", "v_proj", "o_proj"]
 
@@ -114,13 +107,13 @@ def estimate_memory_usage(
 ) -> dict:
     """
     Estimate VRAM usage for training.
-    
+
     Args:
         model_name: Model name or path
         method: Fine-tuning method
         batch_size: Training batch size
         max_seq_length: Maximum sequence length
-        
+
     Returns:
         Dictionary with memory estimates
     """
@@ -131,7 +124,7 @@ def estimate_memory_usage(
         "34b": 34_000_000_000,
         "70b": 70_000_000_000,
     }
-    
+
     # Try to infer model size
     model_lower = model_name.lower()
     params = None
@@ -139,10 +132,10 @@ def estimate_memory_usage(
         if size in model_lower:
             params = count
             break
-    
+
     if params is None:
         return {"error": "Could not determine model size"}
-    
+
     # Memory estimates (very rough)
     if method == "qlora":
         # 4-bit quantization: ~0.5 bytes per param
@@ -157,12 +150,12 @@ def estimate_memory_usage(
         # FP16 with gradients: ~4 bytes per param
         model_memory_gb = (params * 4) / (1024**3)
         lora_overhead_gb = 0
-    
+
     # Activation memory (rough estimate)
     activation_memory_gb = (batch_size * max_seq_length * 4096 * 4) / (1024**3)
-    
+
     total_gb = model_memory_gb + lora_overhead_gb + activation_memory_gb
-    
+
     return {
         "model_memory_gb": round(model_memory_gb, 1),
         "training_overhead_gb": round(lora_overhead_gb, 1),

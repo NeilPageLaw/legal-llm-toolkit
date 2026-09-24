@@ -5,139 +5,70 @@ Command-line interface for common toolkit operations.
 """
 
 import argparse
-import sys
 import json
+import sys
 from pathlib import Path
 
 
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        prog="legalkit",
-        description="Legal LLM Toolkit - Fine-tune and evaluate LLMs on legal text"
+        prog="legalkit", description="Legal LLM Toolkit - Fine-tune and evaluate LLMs on legal text"
     )
-    
+
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
-    
+
     # Preprocess command
-    preprocess_parser = subparsers.add_parser(
-        "preprocess",
-        help="Preprocess legal documents"
-    )
+    preprocess_parser = subparsers.add_parser("preprocess", help="Preprocess legal documents")
     preprocess_parser.add_argument("input", help="Input file or directory")
     preprocess_parser.add_argument("-o", "--output", help="Output file")
     preprocess_parser.add_argument(
-        "-j", "--jurisdiction",
-        default="uk",
-        help="Jurisdiction (uk, us, eu)"
+        "-j", "--jurisdiction", default="uk", help="Jurisdiction (uk, us, eu)"
     )
+    preprocess_parser.add_argument("--anonymise", action="store_true", help="Anonymise PII")
+    preprocess_parser.add_argument("--chunk", action="store_true", help="Create training chunks")
     preprocess_parser.add_argument(
-        "--anonymise",
-        action="store_true",
-        help="Anonymise PII"
+        "--chunk-size", type=int, default=512, help="Chunk size in tokens"
     )
-    preprocess_parser.add_argument(
-        "--chunk",
-        action="store_true",
-        help="Create training chunks"
-    )
-    preprocess_parser.add_argument(
-        "--chunk-size",
-        type=int,
-        default=512,
-        help="Chunk size in tokens"
-    )
-    
+
     # Train command
-    train_parser = subparsers.add_parser(
-        "train",
-        help="Fine-tune a legal LLM"
-    )
+    train_parser = subparsers.add_parser("train", help="Fine-tune a legal LLM")
     train_parser.add_argument("dataset", help="Training dataset path")
     train_parser.add_argument(
-        "-m", "--model",
-        default="mistralai/Mistral-7B-v0.1",
-        help="Base model"
+        "-m", "--model", default="mistralai/Mistral-7B-v0.1", help="Base model"
     )
     train_parser.add_argument(
-        "--method",
-        default="qlora",
-        choices=["full", "lora", "qlora"],
-        help="Fine-tuning method"
+        "--method", default="qlora", choices=["full", "lora", "qlora"], help="Fine-tuning method"
     )
     train_parser.add_argument(
-        "-o", "--output",
-        default="./legal-llm-output",
-        help="Output directory"
+        "-o", "--output", default="./legal-llm-output", help="Output directory"
     )
-    train_parser.add_argument(
-        "--epochs",
-        type=int,
-        default=3,
-        help="Number of epochs"
-    )
-    train_parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=4,
-        help="Batch size"
-    )
-    train_parser.add_argument(
-        "-j", "--jurisdiction",
-        default="uk",
-        help="Jurisdiction"
-    )
-    
+    train_parser.add_argument("--epochs", type=int, default=3, help="Number of epochs")
+    train_parser.add_argument("--batch-size", type=int, default=4, help="Batch size")
+    train_parser.add_argument("-j", "--jurisdiction", default="uk", help="Jurisdiction")
+
     # Evaluate command
-    eval_parser = subparsers.add_parser(
-        "evaluate",
-        help="Evaluate a legal LLM"
-    )
+    eval_parser = subparsers.add_parser("evaluate", help="Evaluate a legal LLM")
     eval_parser.add_argument("model", help="Model path")
-    eval_parser.add_argument(
-        "--tasks",
-        nargs="+",
-        help="Evaluation tasks"
-    )
-    eval_parser.add_argument(
-        "-o", "--output",
-        help="Output file for results"
-    )
-    eval_parser.add_argument(
-        "--max-samples",
-        type=int,
-        help="Maximum samples per task"
-    )
-    
+    eval_parser.add_argument("--tasks", nargs="+", help="Evaluation tasks")
+    eval_parser.add_argument("-o", "--output", help="Output file for results")
+    eval_parser.add_argument("--max-samples", type=int, help="Maximum samples per task")
+
     # Parse citations command
-    cite_parser = subparsers.add_parser(
-        "citations",
-        help="Extract citations from text"
-    )
+    cite_parser = subparsers.add_parser("citations", help="Extract citations from text")
     cite_parser.add_argument("input", help="Input file or text")
-    cite_parser.add_argument(
-        "-j", "--jurisdiction",
-        default="uk",
-        help="Jurisdiction"
-    )
-    cite_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Output as JSON"
-    )
-    
+    cite_parser.add_argument("-j", "--jurisdiction", default="uk", help="Jurisdiction")
+    cite_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
     # Info command
-    info_parser = subparsers.add_parser(
-        "info",
-        help="Show toolkit information"
-    )
-    
+    info_parser = subparsers.add_parser("info", help="Show toolkit information")
+
     args = parser.parse_args()
-    
+
     if args.command is None:
         parser.print_help()
         return 0
-    
+
     try:
         if args.command == "preprocess":
             return cmd_preprocess(args)
@@ -152,17 +83,17 @@ def main():
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
-    
+
     return 0
 
 
 def cmd_preprocess(args):
     """Handle preprocess command."""
-    from legalkit.preprocess import LegalPreprocessor
     from legalkit.data import LegalDataset
-    
+    from legalkit.preprocess import LegalPreprocessor
+
     input_path = Path(args.input)
-    
+
     if input_path.is_dir():
         dataset = LegalDataset.from_directory(input_path)
     elif input_path.suffix == ".jsonl":
@@ -170,44 +101,38 @@ def cmd_preprocess(args):
     else:
         # Single file
         text = input_path.read_text()
-        processor = LegalPreprocessor(
-            jurisdiction=args.jurisdiction,
-            anonymise=args.anonymise
-        )
+        processor = LegalPreprocessor(jurisdiction=args.jurisdiction, anonymise=args.anonymise)
         result = processor.process(text, create_chunks=args.chunk)
-        
+
         if args.output:
             Path(args.output).write_text(result.processed)
         else:
             print(result.processed)
-            
+
         if result.citations:
             print(f"\nFound {len(result.citations)} citations:", file=sys.stderr)
             for c in result.citations:
                 print(f"  - {c.normalised or c.raw}", file=sys.stderr)
-                
+
         return 0
-    
+
     # Process dataset
-    dataset.preprocess(
-        anonymise=args.anonymise,
-        jurisdiction=args.jurisdiction
-    )
-    
+    dataset.preprocess(anonymise=args.anonymise, jurisdiction=args.jurisdiction)
+
     if args.output:
         dataset.to_jsonl(args.output)
         print(f"Saved {len(dataset)} documents to {args.output}")
     else:
         stats = dataset.statistics()
         print(json.dumps(stats, indent=2))
-        
+
     return 0
 
 
 def cmd_train(args):
     """Handle train command."""
     from legalkit.finetune import LegalTrainer, LegalTrainingConfig
-    
+
     config = LegalTrainingConfig(
         base_model=args.model,
         method=args.method,
@@ -216,60 +141,60 @@ def cmd_train(args):
         batch_size=args.batch_size,
         output_dir=args.output,
     )
-    
-    print(f"Training configuration:")
+
+    print("Training configuration:")
     print(json.dumps(config.to_dict(), indent=2))
     print()
-    
+
     trainer = LegalTrainer(config)
-    
+
     print(f"Starting training on {args.dataset}...")
     result = trainer.train(args.dataset)
-    
-    print(f"\nTraining complete!")
+
+    print("\nTraining complete!")
     print(f"Final loss: {result['train_loss']:.4f}")
-    
+
     trainer.save(args.output)
     print(f"Model saved to {args.output}")
-    
+
     return 0
 
 
 def cmd_evaluate(args):
     """Handle evaluate command."""
     from legalkit.eval import LegalBenchmark
-    
+
     benchmark = LegalBenchmark(
         tasks=args.tasks,
         max_samples=args.max_samples,
     )
-    
+
     print(f"Running evaluation on {args.model}...")
     results = benchmark.evaluate(model_path=args.model)
-    
+
     print(results.summary())
-    
+
     if args.output:
         results.save(args.output)
         print(f"\nResults saved to {args.output}")
-        
+
     return 0
 
 
 def cmd_citations(args):
     """Handle citations command."""
     from legalkit.preprocess import CitationParser
-    
+
     input_path = Path(args.input)
-    
+
     if input_path.exists():
         text = input_path.read_text()
     else:
         text = args.input
-    
+
     parser = CitationParser(jurisdiction=args.jurisdiction)
     citations = parser.parse(text)
-    
+
     if args.json:
         print(json.dumps([c.to_dict() for c in citations], indent=2))
     else:
@@ -284,14 +209,14 @@ def cmd_citations(args):
                 print()
         else:
             print("No citations found.")
-            
+
     return 0
 
 
 def cmd_info(args):
     """Handle info command."""
     import legalkit
-    
+
     print(f"""
 Legal LLM Toolkit v{legalkit.__version__}
 

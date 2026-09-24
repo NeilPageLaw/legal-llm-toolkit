@@ -12,15 +12,15 @@ Modules:
 __version__ = "0.1.0"
 __author__ = "Legal LLM Toolkit Contributors"
 
-from legalkit.preprocess import LegalPreprocessor, Anonymiser, CitationParser
-from legalkit.finetune import LegalTrainer, LegalTrainingConfig
-from legalkit.eval import LegalBenchmark, LegalMetrics
 from legalkit.data import LegalDataset, load_legal_corpus
+from legalkit.eval import LegalBenchmark, LegalMetrics
+from legalkit.finetune import LegalTrainer, LegalTrainingConfig
+from legalkit.preprocess import Anonymiser, CitationParser, LegalPreprocessor
 
 __all__ = [
     # Core classes
     "LegalPreprocessor",
-    "Anonymiser", 
+    "Anonymiser",
     "CitationParser",
     "LegalTrainer",
     "LegalTrainingConfig",
