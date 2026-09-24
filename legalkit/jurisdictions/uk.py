@@ -5,6 +5,7 @@ UK jurisdiction configuration.
 import re
 
 from legalkit.jurisdictions.base import JurisdictionConfig
+from legalkit.preprocess import citations
 
 
 class UKJurisdiction(JurisdictionConfig):
@@ -16,35 +17,20 @@ class UKJurisdiction(JurisdictionConfig):
         self.code = "uk"
         self.name = "United Kingdom"
 
-        # UK neutral citation patterns
+        # Case citations: neutral citations and law reports
         self.case_citation_patterns = [
-            # Neutral citations: [2024] UKSC 15
-            re.compile(
-                r"\[(\d{4})\]\s+"
-                r"(UKSC|UKPC|EWCA\s*(?:Civ|Crim)|EWHC|UKUT|UKFTT|UKEAT|UKIAT)"
-                r"\s+(\d+)",
-                re.IGNORECASE,
-            ),
-            # Law reports: [2024] 1 AC 123
-            re.compile(
-                r"\[(\d{4})\]\s+"
-                r"(\d+\s+)?"
-                r"(AC|QB|Ch|Fam|WLR|All\s*ER|Lloyd\'s\s*Rep)"
-                r"\s+(\d+)",
-                re.IGNORECASE,
-            ),
+            citations.UK_NEUTRAL,
+            citations.UK_LAW_REPORTS,
+            citations.UK_ROUND_BRACKET,
+            citations.UK_LR_REPORTS,
         ]
 
-        # UK legislation patterns
+        # Legislation: "section 1 of the Companies Act 2006", "CPR r 3.4"
         self.legislation_citation_patterns = [
-            # Section references: section 1 of the Act 2024
-            re.compile(
-                r"(?:section|s\.?)\s*(\d+[A-Z]?(?:\(\d+\))?)"
-                r"(?:\s+of\s+(?:the\s+)?)?"
-                r"([A-Z][a-zA-Z\s]+(?:Act|Regulations?|Order|Rules?))"
-                r"(?:\s+(\d{4}))?",
-                re.IGNORECASE,
-            ),
+            citations.UK_LEGISLATION,
+            citations.UK_LEGISLATION_TRAILING,
+            citations.UK_ACT,
+            citations.UK_CPR,
         ]
 
         # UK legal terms
@@ -108,7 +94,7 @@ class UKJurisdiction(JurisdictionConfig):
             "tribunal member",
         }
 
-        # UK court hierarchy
+        # UK court hierarchy (England and Wales)
         self.court_hierarchy = [
             "Supreme Court",
             "Privy Council",
@@ -119,6 +105,22 @@ class UKJurisdiction(JurisdictionConfig):
             "Magistrates' Court",
             "Tribunal",
         ]
+
+        self.court_aliases = {
+            "UKSC": "Supreme Court",
+            "UKHL": "Supreme Court",
+            "House of Lords": "Supreme Court",
+            "UKPC": "Privy Council",
+            "EWCA Civ": "Court of Appeal",
+            "EWCA Crim": "Court of Appeal",
+            "EWHC": "High Court",
+            "EWCOP": "High Court",
+            "EWCC": "County Court",
+            "UKUT": "Tribunal",
+            "UKFTT": "Tribunal",
+            "UKEAT": "Tribunal",
+            "EAT": "Tribunal",
+        }
 
         # Document structure patterns
         self.section_patterns = [

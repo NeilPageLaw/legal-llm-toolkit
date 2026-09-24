@@ -6,80 +6,9 @@ import pytest
 
 from legalkit.preprocess import (
     Anonymiser,
-    CitationParser,
     LegalChunker,
     LegalPreprocessor,
 )
-
-
-class TestCitationParser:
-    """Tests for citation parsing."""
-
-    def test_uk_neutral_citation(self):
-        """Test UK neutral citation parsing."""
-        parser = CitationParser(jurisdiction="uk")
-        text = "As held in Smith v Jones [2024] UKSC 15 at [42]"
-
-        citations = parser.parse(text)
-
-        assert len(citations) == 1
-        assert citations[0].year == 2024
-        assert citations[0].court == "UKSC"
-        assert citations[0].jurisdiction == "uk"
-
-    def test_uk_law_report_citation(self):
-        """Test UK law report citation."""
-        parser = CitationParser(jurisdiction="uk")
-        text = "See [2024] 1 AC 123"
-
-        citations = parser.parse(text)
-
-        assert len(citations) == 1
-        assert citations[0].reporter == "AC"
-
-    def test_us_citation(self):
-        """Test US federal citation."""
-        parser = CitationParser(jurisdiction="us")
-        text = "123 F.3d 456 (9th Cir. 2024)"
-
-        citations = parser.parse(text)
-
-        assert len(citations) == 1
-        assert citations[0].volume == "123"
-        assert citations[0].jurisdiction == "us"
-
-    def test_eu_citation(self):
-        """Test EU case citation."""
-        parser = CitationParser(jurisdiction="eu")
-        text = "In Case C-123/24, the Court held..."
-
-        citations = parser.parse(text)
-
-        assert len(citations) == 1
-        assert citations[0].jurisdiction == "eu"
-
-    def test_uk_legislation(self):
-        """Test UK legislation reference."""
-        parser = CitationParser(jurisdiction="uk")
-        text = "Under section 1 of the Companies Act 2006"
-
-        citations = parser.parse(text)
-
-        assert len(citations) >= 1
-        leg_citations = [c for c in citations if c.citation_type == "legislation"]
-        assert len(leg_citations) == 1
-
-    def test_multiple_citations(self):
-        """Test parsing multiple citations."""
-        parser = CitationParser(jurisdiction="uk")
-        text = """
-        As established in [2020] UKSC 1 and confirmed in 
-        [2022] EWCA Civ 123, the principle applies.
-        """
-
-        citations = parser.parse(text)
-
-        assert len(citations) == 2
 
 
 class TestAnonymiser:

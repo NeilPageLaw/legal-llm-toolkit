@@ -5,6 +5,7 @@ EU jurisdiction configuration.
 import re
 
 from legalkit.jurisdictions.base import JurisdictionConfig
+from legalkit.preprocess import citations
 
 
 class EUJurisdiction(JurisdictionConfig):
@@ -16,22 +17,13 @@ class EUJurisdiction(JurisdictionConfig):
         self.code = "eu"
         self.name = "European Union"
 
-        # EU citation patterns
-        self.case_citation_patterns = [
-            # ECJ case numbers: Case C-123/24
-            re.compile(r"Case\s+([CT])-(\d+)/(\d{2})", re.IGNORECASE),
-            # ECLI: ECLI:EU:C:2024:123
-            re.compile(r"ECLI:EU:[CT]:\d{4}:\d+", re.IGNORECASE),
-        ]
+        # Case citations: Case C-123/24, ECLI:EU:C:2024:123, [1991] ECR I-5357
+        self.case_citation_patterns = [citations.EU_CASE, citations.EU_ECLI, citations.EU_ECR]
 
-        # EU legislation patterns
+        # Legislation: Article 6(1) of Regulation (EU) 2016/679, Directive 95/46/EC
         self.legislation_citation_patterns = [
-            # Regulations: Regulation (EU) 2016/679
-            re.compile(r"Regulation\s*\((?:EU|EC)\)\s*(?:No\.?\s*)?(\d+)/(\d+)", re.IGNORECASE),
-            # Directives: Directive 2019/1024
-            re.compile(r"Directive\s*(?:\(EU\)\s*)?(\d+)/(\d+)", re.IGNORECASE),
-            # Article references
-            re.compile(r"Article\s*(\d+)(?:\((\d+)\))?", re.IGNORECASE),
+            citations.EU_LEGISLATION,
+            citations.EU_INSTRUMENT,
         ]
 
         # EU legal terms
@@ -95,6 +87,14 @@ class EUJurisdiction(JurisdictionConfig):
             "Court of Justice",
             "General Court",
         ]
+
+        self.court_aliases = {
+            "CJ": "Court of Justice",
+            "CJEU": "Court of Justice",
+            "ECJ": "Court of Justice",
+            "GC": "General Court",
+            "CFI": "General Court",
+        }
 
         # Document structure patterns
         self.section_patterns = [

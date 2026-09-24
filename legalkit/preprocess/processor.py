@@ -7,7 +7,7 @@ from typing import Any
 
 from legalkit.preprocess.anonymiser import AnonymisationResult, Anonymiser
 from legalkit.preprocess.chunker import LegalChunker
-from legalkit.preprocess.citations import Citation, CitationParser
+from legalkit.preprocess.citations import Citation, CitationParser, deduplicate
 
 
 @dataclass
@@ -124,11 +124,12 @@ class LegalPreprocessor:
 
         # Step 2: Extract citations
         if extract_citations:
-            citations = self.citation_parser.parse(processed)
+            occurrences = self.citation_parser.parse(processed, unique=False)
+            citations = deduplicate(occurrences)
 
             # Optionally normalise citations in text
             if self.normalise_citations:
-                processed = self._normalise_citations_in_text(processed, citations)
+                processed = self._normalise_citations_in_text(processed, occurrences)
 
         # Step 3: Anonymise PII
         if self.anonymiser:
@@ -194,18 +195,28 @@ class LegalPreprocessor:
         return text
 
     def _normalise_citations_in_text(self, text: str, citations: list[Citation]) -> str:
-        """Replace citations with normalised versions."""
-        # Sort by position (reverse) to replace from end
-        sorted_citations = sorted(
-            [(c, text.find(c.raw)) for c in citations if c.raw in text],
-            key=lambda x: x[1],
-            reverse=True,
-        )
+        """
+        Replace every case citation in text with its normalised form.
 
+        Legislation references are left as written: their normalised form
+        reorders the words ("Companies Act 2006, s 1"), which would break
+        the grammar of the surrounding sentence.
+
+        Args:
+            text: The text the citations were parsed from.
+            citations: Every occurrence, with offsets into ``text``.
+        """
         result = text
-        for citation, pos in sorted_citations:
-            if pos >= 0 and citation.normalised:
-                result = result[:pos] + citation.normalised + result[pos + len(citation.raw) :]
+        replaceable = [
+            c
+            for c in citations
+            if c.citation_type == "case" and c.normalised and c.start is not None
+        ]
+        # Replace from the end so earlier offsets stay valid.
+        for citation in sorted(replaceable, key=lambda c: c.start or 0, reverse=True):
+            start, end = citation.start or 0, citation.end or 0
+            if text[start:end] == citation.raw:
+                result = result[:start] + citation.normalised + result[end:]
 
         return result
 
