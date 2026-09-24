@@ -323,6 +323,21 @@ def _flexible(canonical: str, optional_dots: bool = True) -> str:
     return "".join(parts)
 
 
+def _dotted(canonical: str) -> str:
+    """Like _flexible, but also accepts full stops after capitals ("A.C.", "Q.B.D.", "Exch.")."""
+    parts = []
+    for char in canonical:
+        if char == " ":
+            parts.append(r"\s*")
+        elif char in "'’":
+            parts.append(r"['’]?")
+        elif char.isupper():
+            parts.append(re.escape(char) + r"\.?")
+        else:
+            parts.append(re.escape(char))
+    return "".join(parts) + r"\.?"
+
+
 def _alternation(canonicals: Iterable[str], transform: Callable[[str], str] = _flexible) -> str:
     """Longest-first alternation so "All ER (Comm)" wins over "All ER"."""
     return "|".join(transform(c) for c in sorted(canonicals, key=len, reverse=True))
@@ -366,7 +381,7 @@ UK_NEUTRAL = re.compile(
 UK_LAW_REPORTS = re.compile(
     r"\[(?P<year>\d{4})\]\s+"
     r"(?:(?P<volume>\d{1,2})\s+)?"
-    rf"(?P<reporter>{_alternation(UK_REPORTS)})\s+"
+    rf"(?P<reporter>{_alternation(UK_REPORTS, _dotted)})\s+"
     r"(?P<page>\d{1,5})\b",
     re.IGNORECASE,
 )
@@ -374,7 +389,7 @@ UK_LAW_REPORTS = re.compile(
 UK_ROUND_BRACKET = re.compile(
     r"\((?P<year>\d{4})\)\s+"
     r"(?P<volume>\d{1,3})\s+"
-    rf"(?P<reporter>{_alternation(UK_ROUND_BRACKET_REPORTS)})\s+"
+    rf"(?P<reporter>{_alternation(UK_ROUND_BRACKET_REPORTS, _dotted)})\s+"
     r"(?P<page>\d{1,5})\b"
 )
 
