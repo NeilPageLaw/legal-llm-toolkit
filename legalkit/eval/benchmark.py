@@ -651,7 +651,7 @@ class LegalBenchmark:
                 pad_token_id=pad_token_id,
             )
         new_tokens = outputs[0][inputs["input_ids"].shape[1] :]
-        return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        return str(tokenizer.decode(new_tokens, skip_special_tokens=True)).strip()
 
 
 def _read_records(path: Path) -> list[dict]:
@@ -674,7 +674,7 @@ def _read_records(path: Path) -> list[dict]:
 def _first(record: dict, *names: str) -> str:
     for name in names:
         if record.get(name) is not None:
-            return record[name]
+            return str(record[name])
     return ""
 
 
@@ -713,7 +713,7 @@ def _entity(entity: dict | list | tuple) -> tuple[str, str]:
         label, text = entity["label"], entity["text"]
     else:
         label, text = entity
-    return label.upper().replace(" ", "_"), _normalise_entity(text)
+    return str(label).upper().replace(" ", "_"), _normalise_entity(str(text))
 
 
 def _parse_entities(response: str, labels: list[str]) -> set[tuple[str, str]]:

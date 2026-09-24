@@ -58,7 +58,9 @@ def create_qlora_config(config: "LegalTrainingConfig", compute_dtype: str | None
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type=config.bnb_4bit_quant_type,
-        bnb_4bit_compute_dtype=getattr(torch, compute_dtype or config.bnb_4bit_compute_dtype),
+        bnb_4bit_compute_dtype=getattr(
+            torch, compute_dtype or config.bnb_4bit_compute_dtype or "float16"
+        ),
         bnb_4bit_use_double_quant=config.use_nested_quant,
     )
     return create_lora_config(config), bnb_config

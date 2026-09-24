@@ -48,7 +48,7 @@ def load_legal_corpus(
         >>> corpus = load_legal_corpus("./my_contracts/", jurisdiction="uk")
         >>> ledgar = load_legal_corpus("coastalcph/lex_glue", name="ledgar", limit=1000)
     """
-    defaults = {
+    defaults: dict[str, Any] = {
         key: value
         for key, value in {"document_type": document_type, "jurisdiction": jurisdiction}.items()
         if value is not None

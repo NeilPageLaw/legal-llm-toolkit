@@ -44,9 +44,9 @@ class LegalTrainer:
             config: Training configuration
         """
         self.config = config
-        self.model = None
-        self.tokenizer = None
-        self.trainer = None
+        self.model: Any = None
+        self.tokenizer: Any = None
+        self.trainer: Any = None
         self._is_trained = False
 
     def train(

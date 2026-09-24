@@ -221,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        return args.handler(args)
+        return int(args.handler(args))
     except KeyboardInterrupt:
         print("Interrupted", file=sys.stderr)
         return 130

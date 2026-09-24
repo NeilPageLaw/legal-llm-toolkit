@@ -219,7 +219,7 @@ class LegalPreprocessor:
         for citation in sorted(replaceable, key=lambda c: c.start or 0, reverse=True):
             start, end = citation.start or 0, citation.end or 0
             if text[start:end] == citation.raw:
-                result = result[:start] + citation.normalised + result[end:]
+                result = result[:start] + (citation.normalised or citation.raw) + result[end:]
 
         return result
 
@@ -233,26 +233,23 @@ class LegalPreprocessor:
         Returns:
             Dictionary of statistics
         """
-        stats = {
+        by_type: dict[str, int] = {}
+        by_jurisdiction: dict[str, int] = {}
+        for c in result.citations:
+            by_type[c.citation_type] = by_type.get(c.citation_type, 0) + 1
+            by_jurisdiction[c.jurisdiction] = by_jurisdiction.get(c.jurisdiction, 0) + 1
+
+        stats: dict[str, Any] = {
             "original_chars": len(result.original),
             "processed_chars": len(result.processed),
             "reduction_pct": round((1 - len(result.processed) / len(result.original)) * 100, 2)
             if result.original
             else 0,
             "citation_count": len(result.citations),
-            "citations_by_type": {},
-            "citations_by_jurisdiction": {},
+            "citations_by_type": by_type,
+            "citations_by_jurisdiction": by_jurisdiction,
             "chunk_count": len(result.chunks),
         }
-
-        # Count citations by type and jurisdiction
-        for c in result.citations:
-            stats["citations_by_type"][c.citation_type] = (
-                stats["citations_by_type"].get(c.citation_type, 0) + 1
-            )
-            stats["citations_by_jurisdiction"][c.jurisdiction] = (
-                stats["citations_by_jurisdiction"].get(c.jurisdiction, 0) + 1
-            )
 
         # Anonymisation stats
         if result.anonymisation:
