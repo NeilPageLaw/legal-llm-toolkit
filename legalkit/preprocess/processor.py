@@ -2,12 +2,24 @@
 Main legal text preprocessor combining all preprocessing capabilities.
 """
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from legalkit.preprocess.anonymiser import AnonymisationResult, Anonymiser
 from legalkit.preprocess.chunker import LegalChunker
 from legalkit.preprocess.citations import Citation, CitationParser, deduplicate
+
+# Spaces, tabs and Unicode spaces (no-break, thin, ideographic ...).
+_HORIZONTAL_SPACE = re.compile(r"[ \t\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]+")
+# Zero-width characters and byte order marks.
+_INVISIBLE = re.compile(r"[\u200b\u200c\u200d\u2060\ufeff]")
+_PAGE_NUMBER_LINE = re.compile(
+    r"^[ \t]*(?:[-–—][ \t]*)?\d{1,4}(?:[ \t]*[-–—])?[ \t]*$\n?", re.MULTILINE
+)
+_PAGE_X_OF_Y_LINE = re.compile(
+    r"^[ \t]*Page[ \t]+\d+(?:[ \t]+of[ \t]+\d+)?[ \t]*$\n?", re.MULTILINE | re.IGNORECASE
+)
 
 
 @dataclass
@@ -55,10 +67,11 @@ class LegalPreprocessor:
         preserve_case_names: bool = True,
         preserve_dates: bool = False,
         chunk_size: int = 512,
-        chunk_overlap: int = 50,
+        chunk_overlap: int | None = None,
         normalise_citations: bool = True,
         normalise_whitespace: bool = True,
         remove_headers_footers: bool = False,
+        anonymiser: Anonymiser | None = None,
     ):
         """
         Initialise the preprocessor.
@@ -69,24 +82,29 @@ class LegalPreprocessor:
             preserve_case_names: Keep case names when anonymising
             preserve_dates: Keep dates when anonymising
             chunk_size: Token size for chunks
-            chunk_overlap: Overlap between chunks
-            normalise_citations: Standardise citation format
+            chunk_overlap: Overlap between chunks in tokens (default: 10% of
+                chunk_size, at most 50)
+            normalise_citations: Standardise case citation format
             normalise_whitespace: Clean up whitespace
-            remove_headers_footers: Attempt to remove page headers/footers
+            remove_headers_footers: Attempt to remove page numbers and
+                "Page X of Y" lines. Also removes lines holding only a
+                number, which in some judgment layouts are paragraph numbers.
+            anonymiser: A configured Anonymiser (e.g. with a salt or NER
+                model). Implies anonymise=True.
         """
         self.jurisdiction = jurisdiction.lower()
-        self.anonymise = anonymise
+        self.anonymise = anonymise or anonymiser is not None
         self.normalise_citations = normalise_citations
         self.normalise_whitespace = normalise_whitespace
         self.remove_headers_footers = remove_headers_footers
 
         # Initialise components
         self.citation_parser = CitationParser(jurisdiction=jurisdiction)
-        self.anonymiser = (
-            Anonymiser(preserve_case_names=preserve_case_names, preserve_dates=preserve_dates)
-            if anonymise
-            else None
-        )
+        if anonymiser is None and anonymise:
+            anonymiser = Anonymiser(
+                preserve_case_names=preserve_case_names, preserve_dates=preserve_dates
+            )
+        self.anonymiser = anonymiser
         self.chunker = LegalChunker(
             chunk_size=chunk_size, overlap=chunk_overlap, jurisdiction=jurisdiction
         )
@@ -163,36 +181,21 @@ class LegalPreprocessor:
         return [self.process(doc, **kwargs) for doc in documents]
 
     def _normalise_whitespace(self, text: str) -> str:
-        """Normalise whitespace in document."""
-        import re
-
-        # Replace multiple spaces with single space
-        text = re.sub(r" +", " ", text)
-
-        # Normalise line endings
+        """Normalise whitespace in document, keeping paragraph breaks."""
         text = text.replace("\r\n", "\n").replace("\r", "\n")
-
-        # Replace multiple newlines with double newline (paragraph break)
+        # Page breaks from PDF extraction become paragraph breaks.
+        text = text.replace("\f", "\n\n").replace("\v", "\n")
+        text = _INVISIBLE.sub("", text)
+        text = _HORIZONTAL_SPACE.sub(" ", text)
+        text = "\n".join(line.strip() for line in text.split("\n"))
         text = re.sub(r"\n{3,}", "\n\n", text)
-
-        # Strip leading/trailing whitespace from lines
-        lines = [line.strip() for line in text.split("\n")]
-        text = "\n".join(lines)
-
         return text.strip()
 
     def _remove_headers_footers(self, text: str) -> str:
-        """Attempt to remove page headers and footers."""
-        import re
-
-        # Remove common page number patterns
-        text = re.sub(r"\n\s*-?\s*\d+\s*-?\s*\n", "\n", text)
-        text = re.sub(r"\nPage \d+ of \d+\n", "\n", text, flags=re.IGNORECASE)
-
-        # Remove common header patterns (case numbers, dates at start of pages)
-        # This is heuristic and may need tuning
-
-        return text
+        """Remove lines that hold only a page number or "Page X of Y"."""
+        text = _PAGE_NUMBER_LINE.sub("", text)
+        text = _PAGE_X_OF_Y_LINE.sub("", text)
+        return re.sub(r"\n{3,}", "\n\n", text)
 
     def _normalise_citations_in_text(self, text: str, citations: list[Citation]) -> str:
         """
