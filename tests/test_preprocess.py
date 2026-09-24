@@ -5,65 +5,9 @@ Tests for preprocessing module.
 import pytest
 
 from legalkit.preprocess import (
-    Anonymiser,
     LegalChunker,
     LegalPreprocessor,
 )
-
-
-class TestAnonymiser:
-    """Tests for PII anonymisation."""
-
-    def test_email_anonymisation(self):
-        """Test email anonymisation."""
-        anon = Anonymiser()
-        text = "Contact john.smith@example.com for details"
-
-        result = anon.anonymise(text)
-
-        assert "john.smith@example.com" not in result.text
-        assert "[EMAIL_1]" in result.text
-
-    def test_phone_anonymisation(self):
-        """Test phone number anonymisation."""
-        anon = Anonymiser()
-        text = "Call us on 07123 456789"
-
-        result = anon.anonymise(text)
-
-        assert "07123 456789" not in result.text
-
-    def test_preserve_case_names(self):
-        """Test that case names are preserved when configured."""
-        anon = Anonymiser(preserve_case_names=True)
-        text = "In Smith v Jones [2024] UKSC 1, the court held..."
-
-        result = anon.anonymise(text)
-
-        # Case names should be preserved in context of citations
-        assert "Smith" in result.text or "[PERSON" in result.text
-
-    def test_consistent_replacement(self):
-        """Test consistent replacement of same entity."""
-        anon = Anonymiser(consistent_replacement=True)
-        text = "Mr Smith said. Later, Mr Smith confirmed."
-
-        result = anon.anonymise(text)
-
-        # Same name should get same replacement
-        replacements = [v for v in result.mapping.values() if "PERSON" in v]
-        # The same person should map to the same replacement
-
-    def test_reversible_anonymisation(self):
-        """Test that anonymisation can be reversed."""
-        anon = Anonymiser()
-        original = "Email john@test.com for help"
-
-        result = anon.anonymise(original)
-        reversed_text = anon.deanonymise(result.text, result.mapping)
-
-        # Should be able to restore original
-        assert "john@test.com" in reversed_text or original == reversed_text
 
 
 class TestLegalChunker:

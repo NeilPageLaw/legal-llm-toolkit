@@ -672,15 +672,24 @@ class CitationParser:
         self._propagate_parallel_parties(text, citations)
         return deduplicate(citations) if unique else citations
 
-    def find_case_names(self, text: str) -> list[tuple[str, int, int]]:
+    def find_case_names(
+        self, text: str, citations: list[Citation] | None = None
+    ) -> list[tuple[str, int, int]]:
         """
         Find case names that are immediately followed by a case citation.
+
+        Args:
+            text: Text to search.
+            citations: Every citation occurrence in ``text``, if already
+                parsed with ``parse(text, unique=False)``.
 
         Returns:
             (name, start, end) tuples with offsets into ``text``.
         """
+        if citations is None:
+            citations = self.parse(text, unique=False)
         names = []
-        for citation in self.parse(text, unique=False):
+        for citation in citations:
             if citation.citation_type != "case" or citation.start is None:
                 continue
             span = self._case_name_span(text, citation.start)

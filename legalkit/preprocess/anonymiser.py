@@ -5,9 +5,13 @@ Handles names, addresses, dates, financial information, and other
 personally identifiable information while preserving legal structure.
 """
 
+import hashlib
 import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import Enum
+
+from legalkit.preprocess.citations import CitationParser
 
 
 class EntityType(Enum):
@@ -53,62 +57,254 @@ class AnonymisationResult:
         return None
 
 
+# A detector finds entities the rules cannot, e.g. untitled names. It returns
+# (start, end, label) spans, where label is an EntityType value or an NER
+# label such as "PERSON" or "ORG".
+Detector = Callable[[str], Iterable[tuple[int, int, str]]]
+
+NER_LABELS = {
+    "PERSON": EntityType.PERSON,
+    "PER": EntityType.PERSON,
+    "ORG": EntityType.ORGANISATION,
+    "ORGANIZATION": EntityType.ORGANISATION,
+    "ORGANISATION": EntityType.ORGANISATION,
+    "EMAIL_ADDRESS": EntityType.EMAIL,
+    "PHONE_NUMBER": EntityType.PHONE,
+    "IBAN_CODE": EntityType.ACCOUNT_NUMBER,
+    "CREDIT_CARD": EntityType.ACCOUNT_NUMBER,
+    "UK_NHS": EntityType.NATIONAL_ID,
+    "US_SSN": EntityType.NATIONAL_ID,
+}
+
+
+def _iban_is_valid(value: str) -> bool:
+    """Check an IBAN's mod-97 check digits."""
+    compact = value.replace(" ", "")
+    rearranged = compact[4:] + compact[:4]
+    digits = "".join(str(int(char, 36)) for char in rearranged)
+    return int(digits) % 97 == 1
+
+
+def _luhn_is_valid(value: str) -> bool:
+    """Check a payment card number with the Luhn algorithm."""
+    digits = [int(d) for d in re.sub(r"\D", "", value)]
+    if not 13 <= len(digits) <= 19:
+        return False
+    total = 0
+    for index, digit in enumerate(reversed(digits)):
+        if index % 2 == 1:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        total += digit
+    return total % 10 == 0
+
+
+@dataclass(frozen=True)
+class _Rule:
+    """A detection rule. A pattern group named "value" narrows the entity span."""
+
+    entity_type: EntityType
+    pattern: re.Pattern
+    validator: Callable[[str], bool] | None = None
+
+
+_MONTH = (
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?"
+    r"|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+)
+_STREET_TYPES = (
+    r"(?:Street|St|Road|Rd|Avenue|Ave|Lane|Ln|Drive|Dr|Court|Ct|Place|Pl|Square|Sq|"
+    r"Gardens|Gdns|Crescent|Cres|Way|Close|Terrace|Grove|Hill|Park|Row|Mews|Walk|"
+    r"Parade|Rise|View|Green|Boulevard|Blvd|Wharf|Quay|Yard|Circus)"
+)
+
+# Rules in priority order: when two matches cover the same text, the earlier
+# rule wins (a sort code beats a date that looks the same).
+RULES = (
+    _Rule(
+        EntityType.EMAIL,
+        re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+    ),
+    _Rule(
+        EntityType.NATIONAL_ID,
+        # UK National Insurance number
+        re.compile(
+            r"\b(?!BG|GB|NK|KN|TN|NT|ZZ)[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]"
+            r"\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]\b"
+        ),
+    ),
+    _Rule(EntityType.NATIONAL_ID, re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),  # US SSN
+    _Rule(
+        EntityType.NATIONAL_ID,
+        re.compile(r"(?i:\bNHS\s*(?:no\.?|number)?\s*:?\s*)(?P<value>\d{3}\s?\d{3}\s?\d{4})\b"),
+    ),
+    _Rule(EntityType.ACCOUNT_NUMBER, re.compile(r"\b\d{2}-\d{2}-\d{2}\b")),  # UK sort code
+    _Rule(
+        EntityType.ACCOUNT_NUMBER,
+        re.compile(r"(?i:\baccount\s*(?:no\.?|number)?\s*:?\s*)(?P<value>\d{8})\b"),
+    ),
+    _Rule(
+        EntityType.ACCOUNT_NUMBER,
+        re.compile(r"\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){2,7}(?:\s?[A-Z0-9]{1,3})?\b"),
+        validator=_iban_is_valid,
+    ),
+    _Rule(
+        EntityType.ACCOUNT_NUMBER,
+        re.compile(r"\b(?:\d{4}[ -]?){3}\d{1,7}\b"),
+        validator=_luhn_is_valid,
+    ),
+    _Rule(
+        EntityType.CASE_NUMBER,
+        # Court claim numbers: HC-2014-000123, CO/1234/2020, C1/2020/1234
+        re.compile(r"\b(?:[A-Z]{2}-\d{4}-\d{6}|[A-Z]{1,3}\d?/\d{4}/\d{2,5})\b"),
+    ),
+    _Rule(
+        EntityType.PHONE,
+        # UK: 020 7123 4567, 07123 456789, +44 (0)20 7123 4567
+        re.compile(r"(?<![\d+])(?:\+44\s?(?:\(0\)\s?)?|0)(?:\d[\s-]?){8,9}\d(?!\d)"),
+    ),
+    _Rule(
+        EntityType.PHONE,
+        # North American: (555) 123-4567, 555.123.4567, +1 555 123 4567
+        re.compile(r"(?<![\d-])(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?![\d-])"),
+    ),
+    _Rule(
+        EntityType.ADDRESS,
+        re.compile(rf"\b\d{{1,4}}[A-Za-z]?,?\s+(?:[A-Z][a-z'’\-]+\s+){{1,3}}{_STREET_TYPES}\b\.?"),
+    ),
+    _Rule(
+        EntityType.ADDRESS,
+        # UK postcode
+        re.compile(r"\b[A-PR-UWYZ][A-HK-Y]?\d[A-HJKPS-UW\d]?\s?\d[ABD-HJLNP-UW-Z]{2}\b"),
+    ),
+    _Rule(
+        EntityType.DATE,
+        re.compile(
+            rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH}\.?,?\s+\d{{4}}\b"
+            rf"|\b{_MONTH}\.?\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s+\d{{4}}\b"
+            r"|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"
+            r"|\b\d{4}-\d{2}-\d{2}\b",
+            re.IGNORECASE,
+        ),
+    ),
+    _Rule(
+        EntityType.MONEY,
+        re.compile(
+            r"(?:[£$€]|\b(?:GBP|USD|EUR)\s?)\d[\d,]*(?:\.\d{1,2})?"
+            r"(?:\s?(?:million|billion|thousand|bn|m|k)\b)?"
+            r"|\b\d[\d,]*(?:\.\d{1,2})?(?:\s(?:million|billion|thousand))?"
+            r"\s?(?:pounds?|dollars?|euros?|GBP|USD|EUR)\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+_TITLES = (
+    "Mr",
+    "Mrs",
+    "Ms",
+    "Miss",
+    "Mx",
+    "Dr",
+    "Prof",
+    "Professor",
+    "Sir",
+    "Dame",
+    "Lord",
+    "Lady",
+    "Rev",
+    "Revd",
+)
+# A capitalised name ("Smith", "O'Brien", "McDonald", "Smith-Jones") or an initial.
+_NAME_TOKEN = r"(?:(?:[A-Z]['’])?[A-Z][A-Za-z\-]*[a-z]|[A-Z](?:\.|\b(?!['’])))"
+_TITLED_NAME = re.compile(
+    r"\b(?:" + "|".join(sorted(_TITLES, key=len, reverse=True)) + r")\.?\s+"
+    rf"(?P<name>{_NAME_TOKEN}(?:\s+{_NAME_TOKEN}){{0,3}})"
+)
+
+_ORG_SUFFIX = (
+    r"(?:Limited|Ltd|PLC|plc|Inc|LLC|LLP|L\.L\.P|Corporation|Corp|Company|Co|"
+    r"GmbH|AG|SA|S\.A|NV|N\.V|BV|B\.V|SE|LP|L\.P)"
+)
+_ORG = re.compile(
+    r"\b(?:[A-Z][\w&'’\-]*|&)(?:\s+(?:[A-Z][\w&'’\-]*|&|and|of|the|for|de|du)){0,6}"
+    # Keep an abbreviation's full stop only mid-sentence ("Acme Ltd. and").
+    rf"\s+{_ORG_SUFFIX}\b(?:\.(?=\s+[a-z,;]))?"
+)
+
+# Words that start a sentence or clause, or describe a role, rather than
+# forming part of an organisation's name.
+_ORG_LEADING_WORDS = frozenset(
+    """
+    a after also although an and as at because before between but by dear during
+    for from further furthermore however if in it its meanwhile moreover of on our
+    re since so that the their then there these this those to under when where
+    whereas which while with yesterday today your
+    """.split()
+)
+_JOB_TITLE_WORDS = frozenset(
+    """
+    board chair chairman chairwoman chief company director directors employee employees
+    executive finance general head managing manager member members officer partner
+    president secretary shareholder shareholders
+    """.split()
+)
+# Organisation-like names that are public bodies, not private parties.
+_PUBLIC_BODY_WORDS = (
+    "court",
+    "tribunal",
+    "parliament",
+    "house of lords",
+    "privy council",
+    "commission",
+    "government",
+    "ministry",
+    "department",
+    "crown",
+    "secretary of state",
+)
+
+
 class Anonymiser:
     """
     Anonymises PII in legal documents while preserving legal structure.
 
     Features:
-    - Consistent replacement (same name → same placeholder throughout)
-    - Preserves legal citations and case names
-    - Handles UK/EU data protection requirements
-    - Reversible with mapping file
+    - Consistent replacement (same entity -> same placeholder throughout)
+    - Placeholders numbered in reading order: [PERSON_1], [PERSON_2], ...
+    - Legal citations are never altered; case names in citations are kept
+      when ``preserve_case_names`` is set
+    - Structured identifiers: emails, phone numbers, UK postcodes, NI and
+      NHS numbers, sort codes, IBANs (checksum validated), payment cards
+      (Luhn validated), court claim numbers
+    - Reversible with the returned mapping
+
+    Limitations:
+        Rule-based detection finds titled names ("Mr Smith", "Dr Jane Doe")
+        and companies with a legal-form suffix ("Acme Ltd"). Untitled names
+        ("Jane Smith") need a named-entity model: pass ``ner="en_core_web_sm"``
+        (requires spaCy) or your own detector. No automated tool guarantees
+        anonymisation; review output before relying on it.
+
+        Case names inside citations are public record, but if a document
+        concerns one of the cited cases the preserved names can identify its
+        parties. Set ``preserve_case_names=False`` for such documents.
 
     Example:
         >>> anon = Anonymiser()
-        >>> result = anon.anonymise("John Smith of 123 High Street signed the contract")
+        >>> result = anon.anonymise("Mr John Smith of 12 High Street signed the contract")
         >>> print(result.text)
-        '[PERSON_1] of [ADDRESS_1] signed the contract'
+        [PERSON_1] of [ADDRESS_1] signed the contract
         >>> print(result.mapping)
-        {'John Smith': '[PERSON_1]', '123 High Street': '[ADDRESS_1]'}
+        {'Mr John Smith': '[PERSON_1]', '12 High Street': '[ADDRESS_1]'}
     """
 
-    # Patterns for different entity types
-    PATTERNS = {
-        EntityType.EMAIL: re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"),
-        EntityType.PHONE: re.compile(
-            r"(?:\+44\s?|0)(?:\d\s?){9,10}|"
-            r"(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}"
-        ),
-        EntityType.MONEY: re.compile(
-            r"[£$€]\s*[\d,]+(?:\.\d{2})?(?:\s*(?:million|billion|m|bn|k))?|"
-            r"[\d,]+(?:\.\d{2})?\s*(?:pounds?|dollars?|euros?|GBP|USD|EUR)",
-            re.IGNORECASE,
-        ),
-        EntityType.DATE: re.compile(
-            r"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June|"
-            r"July|August|September|October|November|December)\s+\d{4}\b|"
-            r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
-            re.IGNORECASE,
-        ),
-        EntityType.NATIONAL_ID: re.compile(
-            r"\b[A-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-Z]\b|"  # UK NI number
-            r"\b\d{3}-\d{2}-\d{4}\b"  # US SSN
-        ),
-        EntityType.ACCOUNT_NUMBER: re.compile(
-            r"\b\d{8}\b(?=.*sort)|"  # UK account
-            r"\b\d{2}-\d{2}-\d{2}\b"  # UK sort code
-        ),
-        EntityType.ADDRESS: re.compile(
-            r"\d+\s+[A-Z][a-zA-Z\s]+(?:Street|Road|Avenue|Lane|Drive|Court|"
-            r"Place|Square|Gardens|Crescent|Way|Close|Terrace)\b",
-            re.IGNORECASE,
-        ),
-    }
+    RULES = RULES
+    TITLES = set(_TITLES)
 
-    # Common UK/US titles and suffixes for name detection
-    TITLES = {"Mr", "Mrs", "Ms", "Miss", "Dr", "Prof", "Sir", "Dame", "Lord", "Lady"}
-
-    # Legal terms to preserve (not anonymise)
+    # Words that mark a titled name as a legal role rather than a person
+    # to anonymise ("Mr Justice Smith").
     LEGAL_PRESERVE = {
         "claimant",
         "defendant",
@@ -134,30 +330,52 @@ class Anonymiser:
         preserve_dates: bool = False,
         consistent_replacement: bool = True,
         salt: str | None = None,
+        entity_types: Iterable[EntityType | str] | None = None,
+        ner: str | Detector | None = None,
     ):
         """
         Initialise the anonymiser.
 
         Args:
-            preserve_case_names: Keep case citation names (Smith v Jones)
-            preserve_dates: Don't anonymise dates (useful for legal timelines)
-            consistent_replacement: Same entity gets same placeholder
-            salt: Salt for deterministic hashing (for reproducibility)
+            preserve_case_names: Keep party names inside case citations
+                ("Smith v Jones [2024] UKSC 1").
+            preserve_dates: Don't anonymise dates (useful for legal timelines).
+            consistent_replacement: Same entity gets same placeholder.
+            salt: Secret for deterministic placeholders such as
+                [PERSON_3f9a1c2e]. The same entity then gets the same
+                placeholder in every document and every run, without storing
+                a mapping. This is pseudonymisation, not anonymisation: anyone
+                with the salt can test guesses. Keep it secret.
+            entity_types: Entity types to anonymise (EntityType members or
+                their values, e.g. "person"). Defaults to all.
+            ner: Optional named-entity detector for names the rules miss:
+                a spaCy model name such as "en_core_web_sm", or a callable
+                returning (start, end, label) spans.
         """
         self.preserve_case_names = preserve_case_names
         self.preserve_dates = preserve_dates
         self.consistent_replacement = consistent_replacement
-        self.salt = salt or ""
+        self.salt = salt
 
+        if entity_types is None:
+            selected = set(EntityType)
+        else:
+            selected = {_as_entity_type(t) for t in entity_types}
+        if preserve_dates:
+            selected.discard(EntityType.DATE)
+        self.entity_types: frozenset[EntityType] = frozenset(selected)
+
+        self._detector: Detector | None = _spacy_detector(ner) if isinstance(ner, str) else ner
+        self._citation_parser = CitationParser()
         self._counters: dict[EntityType, int] = {}
+        self._lookup: dict[tuple[EntityType, str], str] = {}
         self._mapping: dict[str, str] = {}
-        self._case_names: set[str] = set()
 
     def reset(self):
         """Reset counters and mappings for new document."""
-        self._counters = {t: 0 for t in EntityType}
+        self._counters = {}
+        self._lookup = {}
         self._mapping = {}
-        self._case_names = set()
 
     def anonymise(self, text: str, reset: bool = True) -> AnonymisationResult:
         """
@@ -165,167 +383,58 @@ class Anonymiser:
 
         Args:
             text: Text to anonymise
-            reset: Reset counters for new document
+            reset: Reset counters for new document. Pass False to continue
+                numbering, and reuse placeholders, from the previous call.
 
         Returns:
-            AnonymisationResult with anonymised text and mapping
+            AnonymisationResult with anonymised text, the entities found
+            (offsets into the input text) and the original -> placeholder mapping
         """
         if reset:
             self.reset()
 
-        entities: list[AnonymisedEntity] = []
+        protected = self._protected_spans(text)
+        candidates = self._find_candidates(text)
 
-        # Extract case names first if preserving
-        if self.preserve_case_names:
-            self._extract_case_names(text)
-
-        # Find all entities
-        for entity_type, pattern in self.PATTERNS.items():
-            if entity_type == EntityType.DATE and self.preserve_dates:
+        # Keep non-overlapping candidates: earliest first, then longest, then
+        # by rule priority. Anything touching a citation or preserved case
+        # name is dropped.
+        candidates.sort(key=lambda c: (c[0], -(c[1] - c[0]), c[3]))
+        accepted: list[tuple[int, int, EntityType, float]] = []
+        last_end = -1
+        for start, end, entity_type, _, confidence in candidates:
+            if start < last_end or any(
+                start < p_end and p_start < end for p_start, p_end in protected
+            ):
                 continue
+            accepted.append((start, end, entity_type, confidence))
+            last_end = end
 
-            for match in pattern.finditer(text):
-                original = match.group(0)
-
-                # Skip if it's a case name we're preserving
-                if self._is_case_name(original):
-                    continue
-
-                replacement = self._get_replacement(original, entity_type)
-
-                entities.append(
-                    AnonymisedEntity(
-                        original=original,
-                        replacement=replacement,
-                        entity_type=entity_type,
-                        start=match.start(),
-                        end=match.end(),
-                    )
+        entities = []
+        for start, end, entity_type, confidence in accepted:
+            original = text[start:end]
+            entities.append(
+                AnonymisedEntity(
+                    original=original,
+                    replacement=self._get_replacement(original, entity_type),
+                    entity_type=entity_type,
+                    start=start,
+                    end=end,
+                    confidence=confidence,
                 )
-
-        # Find person names (more complex pattern)
-        entities.extend(self._find_person_names(text))
-
-        # Find organisation names
-        entities.extend(self._find_organisations(text))
-
-        # Sort by position (reverse) for replacement
-        entities.sort(key=lambda e: e.start, reverse=True)
-
-        # Apply replacements
-        result_text = text
-        for entity in entities:
-            result_text = (
-                result_text[: entity.start] + entity.replacement + result_text[entity.end :]
             )
+
+        parts = []
+        position = 0
+        for entity in entities:
+            parts.append(text[position : entity.start])
+            parts.append(entity.replacement)
+            position = entity.end
+        parts.append(text[position:])
 
         return AnonymisationResult(
-            text=result_text,
-            entities=sorted(entities, key=lambda e: e.start),
-            mapping=dict(self._mapping),
+            text="".join(parts), entities=entities, mapping=dict(self._mapping)
         )
-
-    def _get_replacement(self, original: str, entity_type: EntityType) -> str:
-        """Get or create replacement for entity."""
-        # Normalise for consistent mapping
-        key = original.strip().lower()
-
-        if self.consistent_replacement and key in self._mapping:
-            return self._mapping[key]
-
-        self._counters[entity_type] = self._counters.get(entity_type, 0) + 1
-        counter = self._counters[entity_type]
-
-        replacement = f"[{entity_type.value.upper()}_{counter}]"
-
-        if self.consistent_replacement:
-            self._mapping[key] = replacement
-            self._mapping[original] = replacement
-
-        return replacement
-
-    def _extract_case_names(self, text: str):
-        """Extract case names to preserve."""
-        # Pattern: Name v Name (typically in citations)
-        case_pattern = re.compile(
-            r"([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)\s+v\.?\s+"
-            r"([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)"
-            r"(?=\s*[\[\(])"  # Followed by citation
-        )
-
-        for match in case_pattern.finditer(text):
-            self._case_names.add(match.group(1).lower())
-            self._case_names.add(match.group(2).lower())
-
-    def _is_case_name(self, text: str) -> bool:
-        """Check if text is a case name we're preserving."""
-        return text.strip().lower() in self._case_names
-
-    def _find_person_names(self, text: str) -> list[AnonymisedEntity]:
-        """Find person names in text."""
-        entities = []
-
-        # Pattern: Title + Name or Capitalised Name sequences
-        # Mr John Smith, Dr Jane Doe, John William Smith
-        name_pattern = re.compile(
-            r"\b(?:" + "|".join(self.TITLES) + r")\.?\s+"
-            r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b"
-        )
-
-        for match in name_pattern.finditer(text):
-            full_match = match.group(0)
-
-            # Skip legal terms
-            if any(term in full_match.lower() for term in self.LEGAL_PRESERVE):
-                continue
-
-            # Skip case names
-            if self._is_case_name(match.group(1)):
-                continue
-
-            replacement = self._get_replacement(full_match, EntityType.PERSON)
-
-            entities.append(
-                AnonymisedEntity(
-                    original=full_match,
-                    replacement=replacement,
-                    entity_type=EntityType.PERSON,
-                    start=match.start(),
-                    end=match.end(),
-                    confidence=0.9,
-                )
-            )
-
-        return entities
-
-    def _find_organisations(self, text: str) -> list[AnonymisedEntity]:
-        """Find organisation names in text."""
-        entities = []
-
-        # Pattern: Name + Ltd/Limited/PLC/Inc etc
-        org_pattern = re.compile(
-            r"\b([A-Z][a-zA-Z\s&\-]+?)\s*"
-            r"(?:Limited|Ltd|PLC|Inc|LLC|LLP|Corporation|Corp)\b\.?",
-            re.IGNORECASE,
-        )
-
-        for match in org_pattern.finditer(text):
-            full_match = match.group(0)
-
-            replacement = self._get_replacement(full_match, EntityType.ORGANISATION)
-
-            entities.append(
-                AnonymisedEntity(
-                    original=full_match,
-                    replacement=replacement,
-                    entity_type=EntityType.ORGANISATION,
-                    start=match.start(),
-                    end=match.end(),
-                    confidence=0.95,
-                )
-            )
-
-        return entities
 
     def deanonymise(self, text: str, mapping: dict[str, str]) -> str:
         """
@@ -338,15 +447,13 @@ class Anonymiser:
         Returns:
             Original text with PII restored
         """
-        result = text
-
-        # Create reverse mapping
-        reverse = {v: k for k, v in mapping.items() if k == k.strip()}
-
-        for replacement, original in reverse.items():
-            result = result.replace(replacement, original)
-
-        return result
+        reverse: dict[str, str] = {}
+        for original, replacement in mapping.items():
+            reverse.setdefault(replacement, original)
+        if not reverse:
+            return text
+        pattern = re.compile("|".join(re.escape(r) for r in sorted(reverse, key=len, reverse=True)))
+        return pattern.sub(lambda m: reverse[m.group(0)], text)
 
     def create_training_pair(self, text: str) -> tuple[AnonymisationResult, dict[str, str]]:
         """
@@ -362,6 +469,147 @@ class Anonymiser:
             Tuple of (AnonymisationResult, reverse_mapping)
         """
         result = self.anonymise(text)
-        reverse_mapping = {v: k for k, v in result.mapping.items()}
-
+        reverse_mapping: dict[str, str] = {}
+        for original, replacement in result.mapping.items():
+            reverse_mapping.setdefault(replacement, original)
         return result, reverse_mapping
+
+    # ------------------------------------------------------------------
+    # Detection
+    # ------------------------------------------------------------------
+
+    def _protected_spans(self, text: str) -> list[tuple[int, int]]:
+        """Spans that must not be altered: citations and, optionally, case names."""
+        citations = self._citation_parser.parse(text, unique=False)
+        spans = [(c.start, c.end) for c in citations if c.start is not None and c.end is not None]
+        if self.preserve_case_names:
+            names = self._citation_parser.find_case_names(text, citations)
+            spans.extend((start, end) for _, start, end in names)
+        return spans
+
+    def _find_candidates(self, text: str) -> list[tuple[int, int, EntityType, int, float]]:
+        """Return (start, end, type, priority, confidence) for every possible entity."""
+        candidates = []
+        for priority, rule in enumerate(self.RULES):
+            if rule.entity_type not in self.entity_types:
+                continue
+            for match in rule.pattern.finditer(text):
+                group = "value" if "value" in rule.pattern.groupindex else 0
+                start, end = match.span(group)
+                if rule.validator is not None and not rule.validator(match.group(group)):
+                    continue
+                candidates.append((start, end, rule.entity_type, priority, 1.0))
+
+        low_priority = len(self.RULES)
+        if EntityType.PERSON in self.entity_types:
+            for start, end in self._find_person_names(text):
+                candidates.append((start, end, EntityType.PERSON, low_priority, 0.9))
+        if EntityType.ORGANISATION in self.entity_types:
+            for start, end in self._find_organisations(text):
+                candidates.append((start, end, EntityType.ORGANISATION, low_priority + 1, 0.9))
+        if self._detector is not None:
+            for start, end, label in self._detector(text):
+                entity_type = _entity_type_for_label(label)
+                if entity_type is None or entity_type not in self.entity_types:
+                    continue
+                if entity_type is EntityType.ORGANISATION and _is_public_body(text[start:end]):
+                    continue
+                candidates.append((start, end, entity_type, low_priority + 2, 0.8))
+        return candidates
+
+    def _find_person_names(self, text: str) -> list[tuple[int, int]]:
+        """Find titled person names ("Mr Smith", "Dr Jane Doe")."""
+        spans = []
+        for match in _TITLED_NAME.finditer(text):
+            words = {word.lower().rstrip(".") for word in match["name"].split()}
+            if words & self.LEGAL_PRESERVE:
+                continue
+            spans.append(match.span())
+        return spans
+
+    def _find_organisations(self, text: str) -> list[tuple[int, int]]:
+        """Find company names ending in a legal form ("Acme Trading Ltd")."""
+        spans = []
+        for match in _ORG.finditer(text):
+            tokens = list(re.finditer(r"\S+", match.group(0)))
+            words = [t.group(0) for t in tokens]
+            # "Mr Brown and Acme Ltd": the organisation starts after the "and".
+            if any(w.rstrip(".") in self.TITLES for w in words) and "and" in words:
+                first = len(words) - 1 - words[::-1].index("and") + 1
+            else:
+                first = 0
+            # Drop sentence starters ("Yesterday Acme Ltd").
+            while first < len(words) - 1 and words[first].lower() in _ORG_LEADING_WORDS:
+                first += 1
+            # Drop a role before "of" ("Managing Director of Acme Ltd").
+            if "of" in words[first:]:
+                of_index = words.index("of", first)
+                if all(w.lower() in _JOB_TITLE_WORDS for w in words[first:of_index]):
+                    first = of_index + 1
+            if first >= len(words) - 1:
+                continue
+            start = match.start() + tokens[first].start()
+            if _is_public_body(text[start : match.end()]):
+                continue
+            spans.append((start, match.end()))
+        return spans
+
+    def _get_replacement(self, original: str, entity_type: EntityType) -> str:
+        """Get or create replacement for entity."""
+        key = (entity_type, re.sub(r"\s+", " ", original).strip().lower())
+
+        if self.consistent_replacement and key in self._lookup:
+            replacement = self._lookup[key]
+        elif self.salt is not None:
+            digest = hashlib.sha256(f"{self.salt}|{key[0].value}|{key[1]}".encode()).hexdigest()
+            replacement = f"[{entity_type.name}_{digest[:8]}]"
+        else:
+            self._counters[entity_type] = self._counters.get(entity_type, 0) + 1
+            replacement = f"[{entity_type.name}_{self._counters[entity_type]}]"
+
+        if self.consistent_replacement or self.salt is not None:
+            self._lookup[key] = replacement
+            self._mapping.setdefault(original, replacement)
+        return replacement
+
+
+def _as_entity_type(value: EntityType | str) -> EntityType:
+    """Accept an EntityType, its value ("person") or its name ("PERSON")."""
+    if isinstance(value, EntityType):
+        return value
+    try:
+        return EntityType(value.lower())
+    except ValueError:
+        valid = ", ".join(t.value for t in EntityType)
+        raise ValueError(f"Unknown entity type: {value!r}. Valid types: {valid}") from None
+
+
+def _entity_type_for_label(label: str) -> EntityType | None:
+    if label.upper() in NER_LABELS:
+        return NER_LABELS[label.upper()]
+    try:
+        return EntityType(label.lower())
+    except ValueError:
+        return None
+
+
+def _is_public_body(name: str) -> bool:
+    lowered = name.lower()
+    return any(word in lowered for word in _PUBLIC_BODY_WORDS)
+
+
+def _spacy_detector(model_name: str) -> Detector:
+    """Build a detector from a spaCy pipeline."""
+    try:
+        import spacy
+    except ImportError as e:
+        raise ImportError(
+            "NER-based anonymisation needs spaCy: pip install 'legal-llm-toolkit[ner]' "
+            f"and python -m spacy download {model_name}"
+        ) from e
+    nlp = spacy.load(model_name)
+
+    def detect(text: str) -> list[tuple[int, int, str]]:
+        return [(ent.start_char, ent.end_char, ent.label_) for ent in nlp(text).ents]
+
+    return detect
