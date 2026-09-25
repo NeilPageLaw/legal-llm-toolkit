@@ -222,10 +222,21 @@ _TITLED_NAME = re.compile(
     r"\b(?:" + "|".join(sorted(_TITLES, key=len, reverse=True)) + r")\.?\s+"
     rf"(?P<name>{_NAME_TOKEN}(?:\s+{_NAME_TOKEN}){{0,3}})"
 )
+# Names in capitals, as in the heading of a judgment ("MR ADAM CARTER").
+# Capitals give no word boundaries, so a name stays on one line and stops
+# before words such as "AND" ("MR SMITH AND MRS SMITH" is two names).
+_UPPER_NAME_STOPWORDS = (
+    "AND OR OF THE FOR VS WHO WAS IS HAS HAD SAID AT IN ON TO BY WITH FROM THAT THIS"
+).split()
+_UPPER_NAME_TOKEN = rf"(?!(?:{'|'.join(_UPPER_NAME_STOPWORDS)})\b)[A-Z][A-Z'’\-]*[A-Z]"
+_TITLED_NAME_UPPER = re.compile(
+    r"\b(?i:" + "|".join(sorted(_TITLES, key=len, reverse=True)) + r")\.?[ \t]+"
+    rf"(?P<name>(?:[A-Z]\.?[ \t]+){{0,2}}{_UPPER_NAME_TOKEN}(?:[ \t]+{_UPPER_NAME_TOKEN}){{0,2}})\b"
+)
 
 _ORG_SUFFIX = (
-    r"(?:Limited|Ltd|PLC|plc|Inc|LLC|LLP|L\.L\.P|Corporation|Corp|Company|Co|"
-    r"GmbH|AG|SA|S\.A|NV|N\.V|BV|B\.V|SE|LP|L\.P)"
+    r"(?:Limited|LIMITED|Ltd|LTD|PLC|plc|Inc|INC|LLC|LLP|L\.L\.P|Corporation|CORPORATION|"
+    r"Corp|CORP|Company|COMPANY|Co|CO|GmbH|AG|SA|S\.A|NV|N\.V|BV|B\.V|SE|LP|L\.P)"
 )
 _ORG = re.compile(
     r"\b(?:[A-Z][\w&'’\-]*|&)(?:\s+(?:[A-Z][\w&'’\-]*|&|and|of|the|for|de|du)){0,6}"
@@ -518,13 +529,14 @@ class Anonymiser:
         return candidates
 
     def _find_person_names(self, text: str) -> list[tuple[int, int]]:
-        """Find titled person names ("Mr Smith", "Dr Jane Doe")."""
+        """Find titled person names ("Mr Smith", "Dr Jane Doe", "MR ADAM CARTER")."""
         spans = []
-        for match in _TITLED_NAME.finditer(text):
-            words = {word.lower().rstrip(".") for word in match["name"].split()}
-            if words & self.LEGAL_PRESERVE:
-                continue
-            spans.append(match.span())
+        for pattern in (_TITLED_NAME, _TITLED_NAME_UPPER):
+            for match in pattern.finditer(text):
+                words = {word.lower().rstrip(".") for word in match["name"].split()}
+                if words & self.LEGAL_PRESERVE:
+                    continue
+                spans.append(match.span())
         return spans
 
     def _find_organisations(self, text: str) -> list[tuple[int, int]]:

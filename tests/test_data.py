@@ -229,6 +229,22 @@ class TestLegalDatasetOperations:
                     1 for s in split_ if s.source == source
                 )
 
+    def test_split_group_by_fills_every_split_with_uneven_groups(self):
+        sizes = {"contract": 6, "judgment": 4, "instructions": 4}
+        samples = [
+            LegalSample(text=f"{source} {i}", source=source)
+            for source, size in sizes.items()
+            for i in range(size)
+        ]
+        train, val, test = LegalDataset(samples).split(0.5, 0.25, 0.25, group_by="source")
+        assert sorted([len(train), len(val), len(test)]) == [4, 4, 6]
+
+    def test_split_never_uses_a_zero_fraction(self):
+        dataset = LegalDataset.from_texts([str(i) for i in range(7)])
+        train, val, test = dataset.split(train=0.5, val=0.5, test=0.0)
+        assert len(test) == 0
+        assert len(train) + len(val) == 7
+
     def test_deduplicate_ignores_case_and_whitespace(self):
         dataset = LegalDataset.from_texts(["The  Claimant", "the claimant", "Other"])
         assert [s.text for s in dataset.deduplicate()] == ["The  Claimant", "Other"]

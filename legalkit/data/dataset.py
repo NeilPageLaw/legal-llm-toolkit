@@ -523,17 +523,15 @@ class LegalDataset:
         if shuffle:
             random.Random(seed).shuffle(units)
 
+        # Give each group to the split furthest below its target size (ties
+        # go to train, then val), so large groups cannot starve the others.
         total = len(self.samples)
-        n_train = min(round(total * train), total)
-        n_val = min(round(total * val), total - n_train)
-        targets = [n_train, n_val]
-
+        targets = [total * fraction for fraction in (train, val, test)]
+        open_splits = [i for i, fraction in enumerate((train, val, test)) if fraction > 0]
         splits: list[list[LegalSample]] = [[], [], []]
-        current = 0
         for unit in units:
-            while current < 2 and len(splits[current]) >= targets[current]:
-                current += 1
-            splits[current].extend(unit)
+            best = max(open_splits, key=lambda i: (targets[i] - len(splits[i]), -i))
+            splits[best].extend(unit)
         return LegalDataset(splits[0]), LegalDataset(splits[1]), LegalDataset(splits[2])
 
     def statistics(self) -> dict[str, Any]:

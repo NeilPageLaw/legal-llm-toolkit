@@ -73,6 +73,18 @@ class TestEntities:
     def test_titled_names(self, text, expected):
         assert anonymised(text) == expected
 
+    def test_names_in_capitals_as_in_judgment_headings(self):
+        text = "BETWEEN:\nMR ADAM CARTER (Claimant)\nand\nDELTA LOGISTICS LTD (Defendant)\n\nMr Adam Carter says"
+        assert anonymised(text) == (
+            "BETWEEN:\n[PERSON_1] (Claimant)\nand\n[ORGANISATION_1] (Defendant)\n\n[PERSON_1] says"
+        )
+
+    def test_names_in_capitals_stop_at_conjunctions(self):
+        assert anonymised("MR SMITH AND MRS SMITH v ACME LIMITED") == (
+            "[PERSON_1] AND [PERSON_2] v [ORGANISATION_1]"
+        )
+        assert anonymised("MR JUSTICE FRASER:") == "MR JUSTICE FRASER:"
+
     def test_judicial_titles_are_kept(self):
         text = "Mr Justice Fraser and Lord Justice Leggatt presided."
         assert anonymised(text) == text
