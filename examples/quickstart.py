@@ -4,9 +4,10 @@ Legal LLM Toolkit - Quickstart Example
 
 This script demonstrates the basic usage of the Legal LLM Toolkit
 for preprocessing legal documents, extracting citations, and
-preparing data for fine-tuning. It needs no machine-learning libraries:
+preparing data for fine-tuning. It needs no machine-learning libraries.
+From a copy of the repository:
 
-    pip install legal-llm-toolkit
+    pip install .
     python examples/quickstart.py
 """
 
@@ -126,7 +127,10 @@ def demo_training_config():
     )
     print(f"\n  Estimated GPU memory: ~{memory['total_estimated_gb']} GB")
     print(f"  Recommended GPU: {memory['recommended_gpu']}")
-    print("\n  To train (needs a GPU and pip install 'legal-llm-toolkit[qlora]'):")
+    print("\n  To train, on a CUDA GPU with the qlora extra:")
+    print(
+        '    pip install "legal-llm-toolkit[qlora] @ git+https://github.com/NeilPageLaw/legal-llm-toolkit"'
+    )
     print("    LegalTrainer(config).train('examples/sample_data/instructions.jsonl')")
 
 

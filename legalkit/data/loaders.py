@@ -5,6 +5,7 @@ Loaders for local legal corpora and Hugging Face datasets.
 from pathlib import Path
 from typing import Any
 
+from legalkit._install import install_command
 from legalkit.data.dataset import LegalDataset, LegalSample
 
 LOCAL_SUFFIXES = (".jsonl", ".json", ".txt", ".md")
@@ -81,7 +82,7 @@ def load_legal_corpus(
     except ImportError as e:
         raise ImportError(
             f"{source!r} is not a local path. Loading it from the Hugging Face Hub "
-            "needs the 'datasets' package: pip install 'legal-llm-toolkit[train]'"
+            f"needs the 'datasets' package: {install_command('train')}"
         ) from e
 
     hf_dataset = load_dataset(str(source), name, split=split, streaming=streaming, **load_kwargs)

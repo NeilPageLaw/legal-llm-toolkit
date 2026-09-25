@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from legalkit._install import install_command
 from legalkit.data.dataset import LegalDataset
 from legalkit.data.loaders import load_legal_corpus
 from legalkit.finetune.config import FinetuneMethod, LegalTrainingConfig
@@ -15,7 +16,7 @@ from legalkit.preprocess.chunker import CHARS_PER_TOKEN
 
 logger = logging.getLogger(__name__)
 
-INSTALL_HINT = "Install the training extras: pip install 'legal-llm-toolkit[train]'"
+INSTALL_HINT = f"Install the training extras: {install_command('train')}"
 
 
 class LegalTrainer:
@@ -24,7 +25,7 @@ class LegalTrainer:
 
     Wraps Hugging Face Transformers, PEFT and TRL for easy fine-tuning with
     legal-domain defaults. Supports full fine-tuning, LoRA and QLoRA (4-bit,
-    needs a CUDA GPU and ``pip install 'legal-llm-toolkit[qlora]'``).
+    needs a CUDA GPU and the ``qlora`` extra).
 
     Example:
         >>> config = LegalTrainingConfig(
@@ -351,6 +352,6 @@ def _qlora_quantization(config: LegalTrainingConfig):
         import bitsandbytes  # noqa: F401
     except ImportError as e:
         raise ImportError(
-            "QLoRA needs bitsandbytes and a CUDA GPU: pip install 'legal-llm-toolkit[qlora]'"
+            f"QLoRA needs bitsandbytes and a CUDA GPU: {install_command('qlora')}"
         ) from e
     return create_qlora_config(config)

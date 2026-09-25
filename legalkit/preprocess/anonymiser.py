@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 
+from legalkit._install import install_command
 from legalkit.preprocess.citations import CitationParser
 
 
@@ -1003,7 +1004,7 @@ def _spacy_detector(model_name: str) -> Detector:
         import spacy
     except ImportError as e:
         raise ImportError(
-            "NER-based anonymisation needs spaCy: pip install 'legal-llm-toolkit[ner]' "
+            f"NER-based anonymisation needs spaCy: {install_command('ner')} "
             f"and python -m spacy download {model_name}"
         ) from e
     nlp = spacy.load(model_name)

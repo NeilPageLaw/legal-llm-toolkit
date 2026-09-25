@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from legalkit._install import install_command
 from legalkit.data.formatting import to_instruction_format
 from legalkit.preprocess.chunker import LegalChunker
 from legalkit.preprocess.processor import LegalPreprocessor
@@ -368,7 +369,7 @@ class LegalDataset:
             from datasets import Dataset
         except ImportError as e:
             raise ImportError(
-                "The 'datasets' package is required: pip install 'legal-llm-toolkit[train]'"
+                f"The 'datasets' package is required: {install_command('train')}"
             ) from e
 
         if template == "messages":

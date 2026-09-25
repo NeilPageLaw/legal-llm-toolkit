@@ -54,7 +54,9 @@ needs no machine-learning libraries.
 
 ## Installation
 
-The toolkit is not on PyPI yet; install it from GitHub:
+Install the toolkit from GitHub. It is not published on PyPI, so always include the
+GitHub URL: installing `legal-llm-toolkit` by name alone would fetch whatever someone else
+had published under that name.
 
 ```bash
 pip install "legal-llm-toolkit @ git+https://github.com/NeilPageLaw/legal-llm-toolkit"

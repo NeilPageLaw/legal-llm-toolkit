@@ -13,6 +13,7 @@ from typing import Any
 
 from tqdm import tqdm
 
+from legalkit._install import install_command
 from legalkit.data.dataset import read_json, read_jsonl
 from legalkit.data.formatting import to_instruction_format
 from legalkit.eval.metrics import LegalMetrics, token_f1, tokenize
@@ -634,7 +635,7 @@ class LegalBenchmark:
             from transformers import AutoModelForCausalLM, AutoTokenizer
         except ImportError as e:
             raise ImportError(
-                "Loading a model needs the evaluation extras: pip install 'legal-llm-toolkit[eval]'"
+                f"Loading a model needs the evaluation extras: {install_command('eval')}"
             ) from e
 
         from legalkit._compat import dtype_kwargs
