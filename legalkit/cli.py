@@ -335,13 +335,16 @@ def cmd_train(args) -> int:
     settings: dict[str, Any] = {}
     if args.config:
         settings = json.loads(Path(args.config).read_text(encoding="utf-8"))
-        # Values derived from the saved task, method or model are derived
-        # again, so that options such as --method get matching settings.
-        for name in settings.pop("derived_settings", []):
-            settings.pop(name, None)
-        unknown = sorted(set(settings) - {f.name for f in fields(LegalTrainingConfig) if f.init})
+        unknown = sorted(
+            set(settings)
+            - {f.name for f in fields(LegalTrainingConfig) if f.init}
+            - {"derived_settings", "derived_from"}
+        )
         if unknown:
             raise ValueError(f"Unknown settings in {args.config}: {', '.join(unknown)}")
+        # Values derived from the saved task, method or model (and not edited
+        # since) are derived again, so options such as --method get matching ones.
+        settings = LegalTrainingConfig.explicit_settings(settings)
 
     options = {
         "base_model": args.model,

@@ -49,8 +49,9 @@ All notable changes to this project are documented here. The format follows
 - Evaluation test data from a directory of `<task>.jsonl` files, checked for missing fields
   and wrong types before any generation; prompt templates, including the model's own chat
   template, for training and evaluation.
-- Saved training configs list their `derived_settings`, which are derived again when the
-  config is reused with another method, task or model.
+- Saved training configs list their `derived_settings` and the inputs they came from; when a
+  config is reused with another method, task or model those settings are derived again,
+  unless they were edited.
 - GitHub Actions CI (lint, types, tests on Python 3.10-3.13, CPU training tests, build),
   pre-commit hooks, a working quickstart and fictional sample data.
 

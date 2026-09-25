@@ -303,3 +303,81 @@ class TestLayouts:
     def test_sentence_full_stops_are_kept(self):
         assert anonymised("Send it to 12 High St. and wait.") == "Send it to [ADDRESS_1] and wait."
         assert anonymised("It went to 12 High St.") == "It went to [ADDRESS_1]."
+
+
+class TestSecondReviewRegressions:
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("Mr A Smith gave evidence.", "[PERSON_1] gave evidence."),
+            ("Mrs A. Jones signed the lease.", "[PERSON_1] signed the lease."),
+            ("Mr John A Smith", "[PERSON_1]"),
+            ("Mr Neil Page", "[PERSON_1]"),
+            ("Mr Page said so.", "[PERSON_1] said so."),
+            ("Mr Said Ahmed", "[PERSON_1]"),
+            ("Ms An Nguyen", "[PERSON_1]"),
+            ("Mr Peter Lord", "[PERSON_1]"),
+        ],
+    )
+    def test_names_that_are_also_common_words(self, text, expected):
+        assert anonymised(text) == expected
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            (
+                "the evidence given by Mr\nJohn Smith was accepted.",
+                "the evidence given by [PERSON_1] was accepted.",
+            ),
+            ("Mr John\nSmith QC", "[PERSON_1] QC"),
+            ("Mr John\nSmith (the Claimant)", "[PERSON_1] (the Claimant)"),
+            ("Mr John\nPaul Smith said so.", "[PERSON_1] said so."),
+            (
+                "the agreement between Acme Trading\nLimited and the tenant",
+                "the agreement between [ORGANISATION_1] and the tenant",
+            ),
+            ("Mr John Smith\nAcme LLP", "[PERSON_1]\n[ORGANISATION_1]"),
+        ],
+    )
+    def test_wrapped_names(self, text, expected):
+        assert anonymised(text) == expected
+
+    def test_wrapped_names_through_the_preprocessor(self):
+        from legalkit.preprocess import LegalPreprocessor
+
+        result = LegalPreprocessor(anonymise=True).process("given by Mr\nJohn Smith was accepted.")
+        assert result.processed == "given by [PERSON_1] was accepted."
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            (
+                "Mr Smith of Royal Bank of Scotland plc wrote.",
+                "[PERSON_1] of [ORGANISATION_1] wrote.",
+            ),
+            ("Mr Brown of Marks & Spencer plc wrote.", "[PERSON_1] of [ORGANISATION_1] wrote."),
+            ("MS Amlin plc insured the risk.", "[ORGANISATION_1] insured the risk."),
+            ("DR Horton Inc built homes.", "[ORGANISATION_1] built homes."),
+            ("Little Miss Sunshine Ltd", "[ORGANISATION_1]"),
+            ("The Co-operative Bank plc lent the money.", "The [ORGANISATION_1] lent the money."),
+        ],
+    )
+    def test_organisation_boundaries(self, text, expected):
+        assert anonymised(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "The Lord Chief Justice gave judgment.",
+            "LORD CHIEF JUSTICE",
+            "Lady Chief Justice Carr presiding.",
+        ],
+    )
+    def test_judicial_offices_are_kept(self, text):
+        assert anonymised(text) == text
+
+    def test_streets_named_after_courts_are_addresses(self):
+        assert (
+            anonymised("She lives at 1 Crown Court, London.") == "She lives at [ADDRESS_1], London."
+        )
+        assert anonymised("3 County Court Road") == "[ADDRESS_1]"

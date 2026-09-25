@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 
 
+def _as_json(value: Any) -> Any:
+    """A value as it reads back from JSON (tuples become lists)."""
+    return json.loads(json.dumps(value))
+
+
 class FinetuneMethod(Enum):
     """Fine-tuning methods."""
 
@@ -33,6 +38,9 @@ class LegalTask(Enum):
 SUPPORTED_METHODS = tuple(method.value for method in FinetuneMethod)
 SUPPORTED_TASKS = tuple(task.value for task in LegalTask)
 SUPPORTED_JURISDICTIONS = ("uk", "us", "eu")
+
+# The settings that derived defaults depend on.
+DERIVATION_INPUTS = ("task", "method", "base_model", "bf16")
 
 # Defaults applied when num_epochs or max_seq_length is not set explicitly.
 GENERAL_DEFAULTS: dict[str, int] = {"num_epochs": 3, "max_seq_length": 2048}
@@ -204,6 +212,7 @@ class LegalTrainingConfig:
             f.name: getattr(self, f.name) for f in fields(self) if f.init and f.name != "hub_token"
         }
         record["derived_settings"] = list(self.derived_settings)
+        record["derived_from"] = {name: getattr(self, name) for name in DERIVATION_INPUTS}
         return record
 
     @classmethod
@@ -211,13 +220,34 @@ class LegalTrainingConfig:
         """
         Create config from dictionary, ignoring unknown keys.
 
-        Settings listed under "derived_settings" are derived again rather than
-        copied, so a saved config reused with another method, task or model
-        gets matching values.
+        Settings listed under "derived_settings" are derived again unless
+        their value was edited, so a saved config reused with another method,
+        task or model gets matching values.
+        """
+        return cls(**cls.explicit_settings(config_dict))
+
+    @classmethod
+    def explicit_settings(cls, config_dict: dict[str, Any]) -> dict[str, Any]:
+        """
+        The settings in a config dictionary that were chosen rather than derived.
+
+        A setting listed under "derived_settings" counts as chosen when its
+        value differs from what the saved task, method and model give (recorded
+        under "derived_from"), i.e. when someone edited it after saving.
         """
         names = {f.name for f in fields(cls) if f.init}
-        derived = set(config_dict.get("derived_settings", []))
-        return cls(**{k: v for k, v in config_dict.items() if k in names and k not in derived})
+        settings = {k: v for k, v in config_dict.items() if k in names}
+        derived = set(config_dict.get("derived_settings", [])) & set(settings)
+        if not derived:
+            return settings
+        inputs = {k: settings[k] for k in DERIVATION_INPUTS if k in settings}
+        inputs.update(config_dict.get("derived_from", {}))
+        baseline = cls(**inputs)
+        return {
+            k: v
+            for k, v in settings.items()
+            if k not in derived or v != _as_json(getattr(baseline, k))
+        }
 
     def save(self, path: str | Path):
         """Save config to JSON file."""

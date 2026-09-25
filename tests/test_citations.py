@@ -396,3 +396,9 @@ class TestReviewRegressions:
         citation = only(parser, text)
         assert citation.raw == raw
         assert text[citation.start : citation.end] == raw
+
+    def test_case_name_offsets_skip_leading_words(self, parser):
+        text = "Applying A v B plc [2002] EWCA Civ 337, the court held."
+        [(name, start, end)] = parser.find_case_names(text)
+        assert name == "A v B plc"
+        assert text[start:end] == "A v B plc"

@@ -184,6 +184,16 @@ class TestSavedConfigReuse:
         contracts = LegalTrainingConfig.from_dict({**saved, "task": "contract_review"})
         assert (contracts.num_epochs, contracts.max_seq_length) == (5, 4096)
 
+    def test_edited_derived_values_are_kept(self, tmp_path):
+        path = tmp_path / "training_config.json"
+        LegalTrainingConfig(method="qlora").save(path)
+        saved = json.loads(path.read_text())
+        saved.update({"max_seq_length": 512, "optim": "adafactor", "num_epochs": 10})
+        path.write_text(json.dumps(saved))
+        config = LegalTrainingConfig.load(path)
+        assert (config.max_seq_length, config.optim, config.num_epochs) == (512, "adafactor", 10)
+        assert config.use_4bit is True  # untouched derived value, same method
+
     def test_explicit_values_survive_reuse(self):
         saved = LegalTrainingConfig(num_epochs=7, optim="adamw_torch").to_dict()
         reloaded = LegalTrainingConfig.from_dict({**saved, "task": "contract_review"})
@@ -191,9 +201,14 @@ class TestSavedConfigReuse:
         assert reloaded.optim == "adamw_torch"
 
 
-def test_full_fine_tuning_keeps_float32_weights():
+def test_model_dtype_follows_mixed_precision():
     torch = pytest.importorskip("torch")
-    trainer = LegalTrainer(LegalTrainingConfig(method="full", fp16=True, bf16=False))
-    assert trainer._torch_dtype(torch) is torch.float32
-    lora = LegalTrainer(LegalTrainingConfig(method="lora", fp16=True, bf16=False))
-    assert lora._torch_dtype(torch) is torch.float16
+
+    def dtype(**settings):
+        return LegalTrainer(LegalTrainingConfig(**settings))._torch_dtype(torch)
+
+    # fp16 full fine-tuning needs float32 weights for the gradient scaler.
+    assert dtype(method="full", fp16=True, bf16=False) is torch.float32
+    assert dtype(method="full") is torch.bfloat16
+    assert dtype(method="lora", fp16=True, bf16=False) is torch.float16
+    assert dtype(method="lora", bf16=False) is torch.float32

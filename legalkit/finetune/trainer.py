@@ -302,9 +302,9 @@ class LegalTrainer:
         return SFTTrainer(**trainer_kwargs)
 
     def _torch_dtype(self, torch):
-        # Full fine-tuning keeps float32 master weights and lets mixed precision
-        # handle the 16-bit compute: float16 weights cannot be unscaled.
-        if self.config.method == FinetuneMethod.FULL.value:
+        # fp16 mixed precision needs float32 weights to train (the gradient
+        # scaler cannot unscale float16 gradients); LoRA trains float32 adapters.
+        if self.config.method == FinetuneMethod.FULL.value and self.config.fp16:
             return torch.float32
         if self.config.bf16:
             return torch.bfloat16

@@ -355,3 +355,43 @@ class TestPreprocessAndChunk:
         for s in documents:
             assert long_text[s.metadata["start_char"] : s.metadata["end_char"]] == s.text
         assert sum(1 for s in chunked if s.is_instruction) == 1
+
+
+class TestSecondReviewRegressions:
+    def test_explicit_text_field_wins_over_context_columns(self):
+        rows = [
+            {
+                "question": "Who is the landlord?",
+                "answer": "Acme",
+                "context": "short snippet",
+                "document": "FULL LEASE TEXT",
+            }
+        ]
+        sample = LegalDataset.from_huggingface(rows, text_field="document")[0]
+        assert sample.text == "FULL LEASE TEXT"
+        assert sample.metadata["context"] == "short snippet"
+
+    def test_document_id_zero_is_a_real_id(self):
+        records = [
+            {"text": "One. " * 200, "document_id": 0},
+            {"text": "Two. " * 200, "document_id": 0},
+            {"text": "Three. " * 200, "document_id": 1},
+        ]
+        chunked = LegalDataset.from_records(records).chunk(chunk_size=64, overlap=0)
+        assert {s.metadata["document_id"] for s in chunked} == {0, 1}
+
+    def test_anonymising_covers_metadata(self):
+        sample = LegalSample.from_dict(
+            {
+                "instruction": "Who owes rent?",
+                "input": "Mr John Smith of 12 High Street owes rent.",
+                "output": "Mr John Smith.",
+                "text": "### Input: Mr John Smith of 12 High Street owes rent. ### Response: Mr John Smith.",
+                "tags": ["Mr John Smith", "arrears"],
+            }
+        )
+        dataset = LegalDataset([sample]).preprocess(anonymise=True)
+        record = json.dumps(dataset.to_records())
+        assert "John Smith" not in record
+        assert "12 High Street" not in record
+        assert dataset[0].metadata["tags"] == ["[PERSON_1]", "arrears"]

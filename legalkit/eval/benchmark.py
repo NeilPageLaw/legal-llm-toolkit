@@ -13,6 +13,7 @@ from typing import Any
 
 from tqdm import tqdm
 
+from legalkit.data.dataset import read_json, read_jsonl
 from legalkit.data.formatting import to_instruction_format
 from legalkit.eval.metrics import LegalMetrics, token_f1, tokenize
 from legalkit.eval.samples import get_sample_data
@@ -683,20 +684,8 @@ class LegalBenchmark:
 
 
 def _read_records(path: Path) -> list[dict]:
-    if path.suffix == ".json":
-        records = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(records, list):
-            raise ValueError(f"{path}: expected a list of records")
-        return records
-    records = []
-    with path.open(encoding="utf-8") as f:
-        for line_number, line in enumerate(f, start=1):
-            if line.strip():
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError as e:
-                    raise ValueError(f"{path}:{line_number}: invalid JSON ({e.msg})") from e
-    return records
+    reader = read_json if path.suffix == ".json" else read_jsonl
+    return [record for _, record in reader(path)]
 
 
 def _first(record: dict, *names: str) -> str:

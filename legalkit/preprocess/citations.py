@@ -1075,7 +1075,9 @@ class CitationParser:
             if not p1 or not p2:
                 return None
             name = re.sub(r"\s+", " ", f"{p1} v {p2}")
-            start = window_start + match.start("p1") + match["p1"].find(p1.split()[0])
+            # The cleaned first party is the last words of the captured one.
+            words = list(re.finditer(r"\S+", match["p1"]))
+            start = window_start + match.start("p1") + words[-len(p1.split())].start()
             end = window_start + match.start("p2") + len(match["p2"].rstrip())
             return name, start, end
 

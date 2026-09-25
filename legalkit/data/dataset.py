@@ -117,20 +117,30 @@ class LegalSample:
         return record
 
     @classmethod
-    def from_dict(cls, record: dict[str, Any], **defaults: Any) -> "LegalSample":
+    def from_dict(
+        cls, record: dict[str, Any], text_key: str | None = None, **defaults: Any
+    ) -> "LegalSample":
         """
         Build a sample from a record, accepting common field-name aliases.
 
         Unrecognised keys are kept in ``metadata``. ``defaults`` supplies
         document_type, jurisdiction or source when the record lacks them.
+
+        Args:
+            record: The source record.
+            text_key: Field holding the text; detected when omitted.
+            **defaults: document_type, jurisdiction or source.
         """
         record = dict(record)
         instruction = _pop_first(record, INSTRUCTION_KEYS)
         response = _pop_first(record, RESPONSE_KEYS)
-        # In instruction data a "text" column is often the fully rendered
-        # prompt and answer; the context is "input" (kept in metadata otherwise).
-        text_keys = CONTEXT_KEYS if instruction is not None else TEXT_KEYS
-        text = _as_text(_pop_first(record, text_keys))
+        if text_key is not None:
+            text = _as_text(record.pop(text_key, None))
+        else:
+            # In instruction data a "text" column is often the fully rendered
+            # prompt and answer; the context is "input" (kept in metadata otherwise).
+            text_keys = CONTEXT_KEYS if instruction is not None else TEXT_KEYS
+            text = _as_text(_pop_first(record, text_keys))
         document_type = record.pop("document_type", None) or defaults.get("document_type")
         jurisdiction = record.pop("jurisdiction", None) or defaults.get("jurisdiction")
         source = record.pop("source", None) or defaults.get("source")
@@ -208,7 +218,7 @@ class LegalDataset:
             ValueError: If a line is not a JSON object.
         """
         path = Path(path)
-        return cls._from_numbered_records(_read_jsonl(path), path.name, defaults)
+        return cls._from_numbered_records(read_jsonl(path), path.name, defaults)
 
     @classmethod
     def from_json(cls, path: str | Path, **defaults: Any) -> "LegalDataset":
@@ -219,7 +229,7 @@ class LegalDataset:
         e.g. "cases.json#3".
         """
         path = Path(path)
-        return cls._from_numbered_records(_read_json(path), path.name, defaults)
+        return cls._from_numbered_records(read_json(path), path.name, defaults)
 
     @classmethod
     def _from_numbered_records(
@@ -281,9 +291,9 @@ class LegalDataset:
                 record = {"text": text}
                 dataset.append(LegalSample.from_dict(record, **{"source": label, **file_defaults}))
             elif suffix == ".jsonl":
-                dataset.extend(cls._from_numbered_records(_read_jsonl(file), label, file_defaults))
+                dataset.extend(cls._from_numbered_records(read_jsonl(file), label, file_defaults))
             elif suffix == ".json":
-                dataset.extend(cls._from_numbered_records(_read_json(file), label, file_defaults))
+                dataset.extend(cls._from_numbered_records(read_json(file), label, file_defaults))
         return dataset
 
     @classmethod
@@ -309,15 +319,14 @@ class LegalDataset:
             if limit is not None and len(dataset) >= limit:
                 break
             record = dict(row)
-            if text_field is not None:
-                if text_field not in record:
-                    raise KeyError(f"Column {text_field!r} not found. Available: {sorted(record)}")
-                record["text"] = record.pop(text_field)
-            elif index == 0 and not any(k in record for k in TEXT_KEYS + INSTRUCTION_KEYS):
-                raise ValueError(
-                    f"Could not find a text column. Pass text_field= one of {sorted(record)}"
-                )
-            sample = LegalSample.from_dict(record, **defaults)
+            if text_field is not None and text_field not in record:
+                raise KeyError(f"Column {text_field!r} not found. Available: {sorted(record)}")
+            if text_field is None and index == 0:
+                if not any(k in record for k in TEXT_KEYS + INSTRUCTION_KEYS):
+                    raise ValueError(
+                        f"Could not find a text column. Pass text_field= one of {sorted(record)}"
+                    )
+            sample = LegalSample.from_dict(record, text_key=text_field, **defaults)
             if not sample.text and not sample.instruction:
                 skipped += 1
                 continue
@@ -382,9 +391,10 @@ class LegalDataset:
         """
         Clean every sample in place with LegalPreprocessor.
 
-        When anonymising, the instruction and response are anonymised with
-        the same mapping as the text, so placeholders stay consistent within
-        each sample. The PII mapping itself is never stored in the dataset.
+        When anonymising, the instruction, response and text values in
+        metadata are anonymised with the same mapping as the text, so
+        placeholders stay consistent within each sample. The PII mapping
+        itself is never stored in the dataset.
 
         Args:
             anonymise: Replace personal data with placeholders.
@@ -411,12 +421,23 @@ class LegalDataset:
                 sample.metadata["citation_count"] = len(result.citations)
                 reset = False
             if processor.anonymiser is not None:
+                anonymiser = processor.anonymiser
                 for attr in ("instruction", "response"):
                     value = getattr(sample, attr)
                     if value:
-                        anonymised = processor.anonymiser.anonymise(value, reset=reset)
-                        setattr(sample, attr, anonymised.text)
+                        setattr(sample, attr, anonymiser.anonymise(value, reset=reset).text)
                         reset = False
+                # Metadata can hold personal data too (e.g. a rendered prompt).
+                for key, value in sample.metadata.items():
+                    if isinstance(value, str) and value:
+                        sample.metadata[key] = anonymiser.anonymise(value, reset=reset).text
+                        reset = False
+                    elif (
+                        isinstance(value, list) and value and all(isinstance(v, str) for v in value)
+                    ):
+                        sample.metadata[key] = [
+                            anonymiser.anonymise(v, reset=False).text for v in value
+                        ]
                 sample.metadata["anonymised"] = True
             if sample.jurisdiction is None:
                 sample.jurisdiction = jurisdiction
@@ -452,7 +473,9 @@ class LegalDataset:
             if sample.is_instruction or not sample.text:
                 chunked.append(sample)
                 continue
-            document_id = sample.metadata.get("document_id") or f"{sample.source or ''}#{position}"
+            document_id = sample.metadata.get("document_id")
+            if document_id is None:
+                document_id = f"{sample.source or ''}#{position}"
             pieces = chunker.chunk_with_metadata(sample.text)
             for index, piece in enumerate(pieces):
                 metadata = {
@@ -571,7 +594,7 @@ class LegalDataset:
         }
 
 
-def _read_jsonl(path: Path) -> list[tuple[int, dict[str, Any]]]:
+def read_jsonl(path: Path) -> list[tuple[int, dict[str, Any]]]:
     """Records of a JSON Lines file with their line numbers."""
     records = []
     with path.open(encoding="utf-8") as f:
@@ -588,7 +611,7 @@ def _read_jsonl(path: Path) -> list[tuple[int, dict[str, Any]]]:
     return records
 
 
-def _read_json(path: Path) -> list[tuple[int, dict[str, Any]]]:
+def read_json(path: Path) -> list[tuple[int, dict[str, Any]]]:
     """Records of a JSON file (a list, or {"data": [...]}) numbered from 1."""
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, dict) and isinstance(data.get("data"), list):
