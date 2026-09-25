@@ -474,3 +474,34 @@ class TestFourthReviewRegressions:
         samples = [LegalSample(text="Text.", metadata={"case_ref": ref}) for ref in refs]
         default = LegalDataset(samples).preprocess(anonymise=True)
         assert [s.metadata["case_ref"] for s in default] == ["[CASE_NUMBER_1]"] * 2
+
+
+class TestFifthReviewRegressions:
+    def test_keep_metadata_accepts_one_key_and_always_keeps_document_id(self):
+        sample = LegalSample(
+            text="Text.",
+            metadata={"case_ref": "CO/1234/2020", "document_id": "Mr John Smith.txt#1"},
+        )
+        metadata = (
+            LegalDataset([sample]).preprocess(anonymise=True, keep_metadata="case_ref")[0].metadata
+        )
+        assert metadata["case_ref"] == "CO/1234/2020"
+        assert metadata["document_id"] == "Mr John Smith.txt#1"
+
+    def test_dict_keys_sets_and_list_subclasses_are_anonymised(self):
+        class Parties(list):
+            pass
+
+        sample = LegalSample(
+            text="Mr John Smith signed.",
+            metadata={
+                "roles": {"Mr John Smith": "claimant"},
+                "names": {"Mrs Jane Doe"},
+                "others": Parties(["Mr Bob Cole"]),
+            },
+        )
+        metadata = LegalDataset([sample]).preprocess(anonymise=True)[0].metadata
+        assert metadata["roles"] == {"[PERSON_1]": "claimant"}
+        assert metadata["names"] == {"[PERSON_2]"}
+        assert metadata["others"] == ["[PERSON_3]"]
+        assert type(metadata["others"]) is Parties

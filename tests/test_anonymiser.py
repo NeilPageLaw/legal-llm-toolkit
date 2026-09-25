@@ -518,7 +518,10 @@ class TestFourthReviewRegressions:
                 "Cross-examined by [PERSON_1]: Did you sign it?",
             ),
             ("by Dr\nPaul J. Brown\nClaimant", "by [PERSON_1]\nClaimant"),
-            ("Evidence of Mr John\nSmith: he denied it.", "Evidence of [PERSON_1]: he denied it."),
+            (
+                "Mr John Smith\nOccupation: retired teacher",
+                "[PERSON_1]\nOccupation: retired teacher",
+            ),
             (
                 "I spoke to Dr Sarah\nPage who examined me.",
                 "I spoke to [PERSON_1] who examined me.",
@@ -576,3 +579,103 @@ class TestFourthReviewRegressions:
 
         assert WithRabbi().anonymise("Rabbi Jonathan Sacks spoke.").text == "[PERSON_1] spoke."
         assert WithoutLord().anonymise("Lord Reed said so.").text == "Lord Reed said so."
+
+
+class TestFifthReviewRegressions:
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("I spoke to Mr\nAn Nguyen who said so.", "I spoke to [PERSON_1] who said so."),
+            ("The report by Dr\nJiankui He said so.", "The report by [PERSON_1] said so."),
+            ("Mr Kenneth To SC appeared.", "[PERSON_1] SC appeared."),
+            ("MR PER SVENSSON\nClaimant", "[PERSON_1]\nClaimant"),
+            ("MR MINH TO", "[PERSON_1]"),
+            ("Ms Nguyen Thi My Linh gave evidence.", "[PERSON_1] gave evidence."),
+            ("mr Smith attended", "[PERSON_1] attended"),
+        ],
+    )
+    def test_names(self, text, expected):
+        assert anonymised(text) == expected
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            (
+                "Present: Mr John Smith\nApologies: none received.",
+                "Present: [PERSON_1]\nApologies: none received.",
+            ),
+            (
+                "Name: Mr John Smith\nOccupation: retired teacher\nMr John Smith signed.",
+                "Name: [PERSON_1]\nOccupation: retired teacher\n[PERSON_1] signed.",
+            ),
+            ("Title: Mr\nSurname: Smith", "Title: Mr\nSurname: Smith"),
+            (
+                "From: Mr John Smith To: Mrs Jane Doe\nMr John Smith wrote.",
+                "From: [PERSON_1] To: [PERSON_2]\n[PERSON_1] wrote.",
+            ),
+            ("Mr Smith On 5 May 2020 he said", "[PERSON_1] On [DATE_1] he said"),
+            ("Letter from Mr Smith To\nMrs Jones", "Letter from [PERSON_1] To\n[PERSON_2]"),
+            ("Dear Sir Or Madam", "Dear Sir Or Madam"),
+        ],
+    )
+    def test_labels_and_link_words_stay_outside_names(self, text, expected):
+        assert anonymised(text) == expected
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            (
+                "Delta Limited was sued.\nACME LIMITED V DELTA LIMITED",
+                "[ORGANISATION_1] was sued.\n[ORGANISATION_2] V [ORGANISATION_1]",
+            ),
+            (
+                "BETWEEN ACME LIMITED Claimant V DELTA LIMITED Defendant",
+                "BETWEEN [ORGANISATION_1] Claimant V [ORGANISATION_2] Defendant",
+            ),
+            ("Mr Smith and Henry V Ltd agreed.", "[PERSON_1] and [ORGANISATION_1] agreed."),
+            (
+                "MR ADAM CARTER V. DELTA FREIGHT LIMITED\nMr Adam Carter gave evidence.",
+                "[PERSON_1] V. [ORGANISATION_1]\n[PERSON_1] gave evidence.",
+            ),
+            (
+                "Mr Adam Carter V Delta Freight Ltd and Mr Adam Carter",
+                "[PERSON_1] V [ORGANISATION_1] and [PERSON_1]",
+            ),
+        ],
+    )
+    def test_versus(self, text, expected):
+        assert anonymised(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "The appeal was heard by 5 Crown Court\njudges sitting together.",
+            "PART 2\nHigh Court\nRules for claims",
+            "the 3 High Court (Chancery Division) judges",
+            "In this Agreement\nCorporation means the company.",
+            "Intervener: HM Attorney General\nAG's submissions were rejected.",
+            "Kent\nSE, London",
+            "the delay was 200 ms ACK timeout",
+            "rev DRAFT 2 of the contract",
+            "Accounts: dr VAT 500",
+        ],
+    )
+    def test_not_personal_data(self, text):
+        assert anonymised(text) == text
+
+    def test_wrapped_legal_forms(self):
+        assert anonymised("Acme\nCorporation Limited agreed") == "[ORGANISATION_1] agreed"
+        assert anonymised("Definitions\nCorporation means Acme Corp.") == (
+            "Definitions\nCorporation means [ORGANISATION_1]."
+        )
+
+    def test_custom_titles(self):
+        class NoTitles(Anonymiser):
+            TITLES: set[str] = set()
+
+        class WithCllr(Anonymiser):
+            TITLES = Anonymiser.TITLES | {"Cllr"}
+
+        text = "The NHS said: UK law applies."
+        assert NoTitles().anonymise(text).text == text
+        assert WithCllr().anonymise("Cllr. Jones said.").text == "[PERSON_1] said."

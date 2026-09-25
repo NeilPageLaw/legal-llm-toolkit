@@ -180,12 +180,13 @@ RULES = (
     _Rule(
         EntityType.ADDRESS,
         re.compile(
-            # "the 2019 High Court judgment" and "5 Crown Court judges" name a
-            # court; "3 County Court Road" and "1 Crown Court, London" are
+            # "the 2019 High Court judgment", "5 Crown Court judges" and "3 High
+            # Court (Chancery Division) judges" name a court; "3 County Court
+            # Road", "1 Crown Court, London" and "1 Crown Court\nLondon" are
             # addresses. After a year, a court name is always a court.
-            r"\b(?:(?P<year>(?:18|19|20)\d\d)\b|(?!(?:18|19|20)\d\d\b)\d{1,4}[A-Za-z]?),?\s+"
+            r"\b(?:(?P<year>(?:18|19|20)\d\d)\b|(?!(?:18|19|20)\d\d\b)\d{1,4}[A-Za-z]?),?[^\S\n]+"
             rf"(?!{_COURT_TYPES}\s+(?:Courts?|Tribunals?)\b(?![ \t]+{_STREET_TYPES}\b)"
-            r"(?(year)|(?=[ \t]+[A-Za-z])))"
+            r"(?(year)|(?=[^\S\n]+[A-Za-z]|[^\S\n]*\([A-Z]|[^\S\n]*\n\s*[a-z])))"
             rf"(?:[A-Z][a-z'’\-]+\s+){{1,3}}{_STREET_TYPES}\b"
             # Keep an abbreviation's full stop only mid-sentence ("12 High St. and").
             r"(?:\.(?=\s+[a-z,;]))?"
@@ -235,7 +236,14 @@ _ORG_TOKEN = rf"(?!{_ORG_SUFFIX_WORD})(?:[{_CAPITAL}][\w&'’\-]*|&)"
 # "Company Secretary" or "Limited Warranty" is not the end of a company name.
 _WRAPPED_ORG_SUFFIX = (
     rf"(?!(?:Company|COMPANY|Co|CO)(?![\w\-])){_ORG_SUFFIX_WORD}(?:{_SPACE}+{_ORG_SUFFIX_WORD})?"
-    rf"(?={_SPACE}*(?:\n|\Z|[,.;:)(\"“”'‘’])|{_SPACE}+[a-z(\"“'‘])"
+    rf"(?={_SPACE}*(?:\n|\Z|[,.;:)(\"“”'‘’])|{_SPACE}+[a-z])"
+)
+# Legal forms that are also words or codes ("Corporation means", "AG" for the
+# Attorney General, "SE" in addresses): at the start of a line they end a
+# company name only after two words of it, or before another legal form.
+_AMBIGUOUS_ORG_SUFFIXES = frozenset("corporation corp ag sa se nv bv lp".split())
+_ORG_SUFFIX_WORDS = frozenset(
+    "limited ltd plc inc llc llp corporation corp company co gmbh ag sa nv bv se lp".split()
 )
 _ORG = re.compile(
     rf"\b{_ORG_TOKEN}(?:{_SPACE}+(?:{_ORG_TOKEN}|and|of|the|for|de|du)){{0,6}}"
@@ -283,37 +291,53 @@ _PUBLIC_BODY_WORDS = (
 _ABBREVIATED_TITLES = ("Mr", "Mrs", "Ms", "Mx", "Dr", "Prof", "Rev", "Revd")
 _WORD_TITLES = ("Miss", "Professor", "Sir", "Dame", "Lord", "Lady")
 _TITLES = _ABBREVIATED_TITLES + _WORD_TITLES
-_ABBREVIATION_WORDS = frozenset(title.lower() for title in _ABBREVIATED_TITLES)
+_UNDOTTED_TITLES = frozenset(title.lower() for title in _WORD_TITLES)
+# Titles also recognised in lower case ("mr Smith"); "ms", "dr" and "rev" are
+# also milliseconds, debit and revision.
+_LOWERCASE_TITLES = frozenset({"mr", "mrs"})
+
+
+def _alternation(words: Iterable[str]) -> str:
+    return "|".join(re.escape(word) for word in sorted(words, key=len, reverse=True))
 
 
 def _title_pattern(titles: Iterable[str]) -> re.Pattern:
     """
-    Match a title in title case or capitals ("Mr", "MR"). Abbreviations may
-    take a full stop and may be in lower case before a name in capitals
-    ("mr SMITH"); words may not, so "Yes, my Lord. The claimant" and "yes
-    sir" hold no name.
+    Match a title in title case or capitals ("Mr", "MR"). Titles other than
+    words such as "Lord" may take a full stop ("Mr."), so "Yes, my Lord. The
+    claimant" holds no name.
     """
-    abbreviations, words = set(), set()
+    dotted: set[str] = set()
+    undotted: set[str] = set()
     for title in titles:
-        if title.lower() in _ABBREVIATION_WORDS:
-            abbreviations |= {title, title.upper(), title.lower()}
-        else:
-            words |= {title, title.upper()}
+        forms = {title, title.upper()}
+        if title.lower() in _LOWERCASE_TITLES:
+            forms.add(title.lower())
+        (undotted if title.lower() in _UNDOTTED_TITLES else dotted).update(forms)
     alternatives = []
-    if abbreviations:
-        alternatives.append(rf"(?:{'|'.join(sorted(abbreviations, key=len, reverse=True))})\.?")
-    if words:
-        alternatives.append("|".join(sorted(words, key=len, reverse=True)))
+    if dotted:
+        alternatives.append(rf"(?:{_alternation(dotted)})\.?")
+    if undotted:
+        alternatives.append(_alternation(undotted))
+    if not alternatives:
+        return re.compile(r"(?!)")  # no titles: match nothing
     return re.compile(rf"(?<!\w)(?:{'|'.join(alternatives)})(?![\w'’\-])")
 
 
 # "Dear Sir" and "My Lord" end their line: the next line is not a name.
 _SALUTATION = re.compile(rf"(?i:\b(?:dear|my)){_SPACE}+\Z")
+# A form label before a title ("Name: Mr", "Present:\tMr John Smith"): the next
+# line holds another field, not the rest of the name.
+_LABEL_BEFORE_TITLE = re.compile(
+    rf"(?:^|\n){_SPACE}*(?:[-*•]|\d+[.)])?{_SPACE}*[A-Z][\w'’\-]*"
+    rf"(?:{_SPACE}+[\w'’\-]+){{0,2}}{_SPACE}*:{_SPACE}*\Z"
+)
 
 # A word of a name: letters with inner apostrophes or hyphens ("O'Brien",
 # "Smith-Jones", "José"), without a possessive "'s".
 _NAME_WORD = re.compile(r"[^\W\d_]+(?:['’\-](?!s\b)[^\W\d_]+)*")
 _NAME_GAP = re.compile(rf"{_SPACE}*\n{_SPACE}*|{_SPACE}+")
+_NEXT_CHARACTER = re.compile(rf"{_SPACE}*(\S|\n|\Z)")
 # An elision or article before the capital: "d'Souza", "al-Hassan".
 _NAME_PREFIX = re.compile(r"^(?:[a-z]{1,2}['’]|(?:al|el)-)")
 
@@ -327,7 +351,7 @@ _NAME_ENDING_WORDS = frozenset(
     schedule clause section part paragraph partner director associate secretary manager
     chairman chair officer consultant clerk trustee trustees executor executors
     administrator administrators receiver liquidator limited ltd plc llp llc inc company
-    co corporation
+    co corporation madam
     """.split()
 )
 # Post-nominals end a name when not in title case ("Mr John Smith KC", "Lord
@@ -338,18 +362,17 @@ _POST_NOMINALS = frozenset(
     mr lj ljj jj cj vc psc dpsc jsc
     """.split()
 )
-# Function words are never part of a name ("MR SMITH AND MRS JONES", "MR ADAM
-# CARTER VS DELTA").
+# Function words are never part of a name ("MR SMITH AND MRS JONES", "Mr Smith
+# In Person").
 _FUNCTION_WORDS = frozenset(
     """
     the this that these those and nor but if of at as by for from with into upon is was
-    are were has had it its we they them their our his me us v vs re via
+    are were has had it its we they them their our his me us v vs re via in
     """.split()
 )
 # Function words that are also names ("Mr Per Svensson", "Ms Or Cohen", "Mr
-# Minh To"). They end a name in capitals, at the start of a line, and before
-# another capitalised word ("Mr Smith In Person").
-_NAME_LIKE_FUNCTION_WORDS = frozenset("per to on or in my".split())
+# Minh To"); see Anonymiser._name_like_word_ends_name.
+_NAME_LIKE_FUNCTION_WORDS = frozenset("per to on or my".split())
 # Words that open a line of a letter or list rather than continue a name
 # wrapped onto it ("Mr John Smith\nThank you", "Mr Smith\nHe replied").
 _LINE_START_WORDS = frozenset(
@@ -373,7 +396,7 @@ _NAME_PARTICLES = frozenset(
 # What may follow a name wrapped onto a new line: running text, not a label
 # ("Apologies:"), a heading or a company ("Mr John Smith\nAcme Holdings plc").
 _WRAPPED_NAME_FOLLOWER = re.compile(
-    rf"{_SPACE}*(?:\Z|\()|[,.;!?)\]'’\"”]|:{_SPACE}+[a-z]|{_SPACE}+[—–-]{_SPACE}"
+    rf"{_SPACE}*(?:\Z|\()|[,.;!?)\]'’\"”]|{_SPACE}+[—–-]{_SPACE}"
     rf"|{_SPACE}+(?!{_ORG_SUFFIX_WORD})[a-z]"
     rf"|{_SPACE}+(?i:{'|'.join(sorted(_POST_NOMINALS))})\b"
 )
@@ -386,6 +409,7 @@ class _NameToken:
     end: int  # after an initial's full stop
     wrapped: bool  # on a line after the title
     dotted: bool  # followed by a full stop ("J.", "Mr.")
+    after: str  # the next character that is not a space: "\n" at a line end, "" at the end
 
 
 def _name_tokens(text: str, position: int, may_wrap: bool, limit: int = 8) -> list[_NameToken]:
@@ -409,7 +433,12 @@ def _name_tokens(text: str, position: int, may_wrap: bool, limit: int = 8) -> li
         dotted = text.startswith(".", end)
         if dotted and len(match.group()) == 1:
             end += 1
-        tokens.append(_NameToken(match.group(), match.start(), end, wrapped, dotted))
+        after = _NEXT_CHARACTER.match(text, end)
+        tokens.append(
+            _NameToken(
+                match.group(), match.start(), end, wrapped, dotted, after.group(1) if after else ""
+            )
+        )
         position = end
     return tokens
 
@@ -525,6 +554,7 @@ class Anonymiser:
         # title they are offices, which _titled_name_end handles.
         roles = {word.lower() for word in self.LEGAL_PRESERVE} - {"judge", "justice"}
         self._name_endings = _NAME_ENDING_WORDS | roles | {f"{word}s" for word in roles}
+        self._parties = self._name_endings | _ORG_SUFFIX_WORDS
         self._title_words = frozenset(title.lower() for title in self.TITLES)
         self._title_pattern = _title_pattern(self.TITLES)
         self._counters: dict[EntityType, int] = {}
@@ -696,23 +726,28 @@ class Anonymiser:
 
     def _titled_name_end(self, text: str, title: re.Match) -> int | None:
         """Where the name after a title ends, or None if no name follows it."""
-        # After "MR" or "mr", the name is in capitals ("MR ADAM CARTER", "mr SMITH").
-        caps = not title.group().rstrip(".").istitle()
-        # A name in capitals, or after "Dear Sir" or "My Lord", stays on its line.
-        salutation = _SALUTATION.search(text, max(0, title.start() - 12), title.start())
-        tokens = _name_tokens(text, title.end(), may_wrap=not caps and salutation is None)
+        form = title.group().rstrip(".")
+        # After "MR" the name is in capitals ("MR ADAM CARTER").
+        caps = form.isupper()
+        # A name stays on the title's line in capitals, after lower-case "mr",
+        # after "Dear Sir" or "My Lord", and after a form label ("Name: Mr").
+        may_wrap = (
+            not caps
+            and not form.islower()
+            and not _SALUTATION.search(text, max(0, title.start() - 12), title.start())
+            and not _LABEL_BEFORE_TITLE.search(text, max(0, title.start() - 60), title.start())
+        )
+        tokens = _name_tokens(text, title.end(), may_wrap)
 
         index = 0
         while index < len(tokens) and self._ends_name(tokens, index, caps):
             index += 1  # further titles: "Professor Sir John Smith"
-        last_title = tokens[index - 1].word if index else title.group()
+        last_title = tokens[index - 1].word if index else form
         name: list[_NameToken] = []
-        words = 0
         for position in range(index, len(tokens)):
-            kind = self._name_part(tokens, position, caps, bool(name))
-            if kind is None or (kind == "word" and words == 4):
+            kind = self._name_part(tokens, position, caps, name)
+            if kind is None or (kind == "word" and _full_words(name) == 4):
                 break
-            words += kind == "word"
             name.append(tokens[position])
 
         name = _trim_name(name)
@@ -737,58 +772,100 @@ class Anonymiser:
         token = tokens[index]
         if not self._is_title(token.word):
             return False
-        if token.dotted and token.word.lower() in _ABBREVIATION_WORDS:
+        if token.dotted and token.word.lower() not in _UNDOTTED_TITLES:
             return True  # "Mrs Jones Mr. Smith", but not "Mr Peter Lord."
         if index + 1 == len(tokens):
             return False
         following = tokens[index + 1].word
         if following.lower() in _POST_NOMINALS and not following.istitle():
             return False  # "Mr Peter Lord QC"
-        return self._name_part(tokens, index + 1, caps, False) is not None
+        return self._name_part(tokens, index + 1, caps, []) is not None
 
     def _is_title(self, word: str) -> bool:
         return word.lower() in self._title_words and (word.istitle() or word.isupper())
 
     def _name_part(
-        self, tokens: list[_NameToken], index: int, caps: bool, continues: bool
+        self, tokens: list[_NameToken], index: int, caps: bool, name: list[_NameToken]
     ) -> str | None:
         """
         Classify tokens[index] as part of a name: "initial", "particle" or
         "word", or None if the name has ended.
 
         Args:
-            continues: The token follows another part of the same name.
+            name: The parts of the name before this token.
         """
         token = tokens[index]
         word = token.word
         lower = word.lower()
-        if token.wrapped and lower in _LINE_START_WORDS:
+        # "Mr John Smith\nHe replied": the first word of the next line, after
+        # a name on the title's line, may start a sentence.
+        if token.wrapped and name and not name[-1].wrapped and lower in _LINE_START_WORDS:
             return None
         if len(word) == 1:
-            if not word.isupper() or (continues and caps and word == "V" and not token.dotted):
-                return None  # "MR ADAM CARTER V DELTA", but not "Mr John V. Smith"
+            if not word.isupper() or (
+                name and word == "V" and self._is_versus(tokens, index, name)
+            ):
+                return None
             return "initial"
         if lower in _FUNCTION_WORDS or lower in self._name_endings:
             return None
-        if lower in _NAME_LIKE_FUNCTION_WORDS:
-            following = tokens[index + 1] if index + 1 < len(tokens) else None
-            before_word = (
-                continues
-                and following is not None
-                and not following.wrapped
-                and _is_capitalised(following.word)
-            )
-            if caps or token.wrapped or before_word:
-                return None
-        if continues and lower in _POST_NOMINALS and not word.istitle():
+        if lower in _NAME_LIKE_FUNCTION_WORDS and self._name_like_word_ends_name(
+            tokens, index, name
+        ):
             return None
-        if continues and self._ends_name(tokens, index, caps):
+        if name and lower in _POST_NOMINALS and not word.istitle():
+            return None
+        if name and self._ends_name(tokens, index, caps):
             return None  # "MR JOHN SMITH MRS JANE DOE"
         if lower in _NAME_PARTICLES and word.islower():
             return "particle"  # "Mr van der Berg"; must precede a word
         if caps:
             return "word" if word.isupper() else None
         return "word" if _is_capitalised(word) else None
+
+    def _is_versus(self, tokens: list[_NameToken], index: int, name: list[_NameToken]) -> bool:
+        """
+        True if a "V" after part of a name separates two parties ("MR ADAM
+        CARTER V DELTA LIMITED", "MR SMITH V MRS JONES") rather than being an
+        initial ("Mr John V. Smith").
+        """
+        if _full_words(name) >= 2:
+            return True
+        return any(
+            self._is_title(token.word) or token.word.lower() in _ORG_SUFFIX_WORDS
+            for token in tokens[index + 1 : index + 5]
+        )
+
+    def _name_like_word_ends_name(
+        self, tokens: list[_NameToken], index: int, name: list[_NameToken]
+    ) -> bool:
+        """
+        Whether "Per", "To", "On", "Or" or "My" ends a name rather than being
+        part of it ("Mr Per Svensson", "Ms Or Cohen", "Mr Minh To").
+        """
+        token = tokens[index]
+        following = tokens[index + 1] if index + 1 < len(tokens) else None
+        starts_next_line = token.wrapped and bool(name) and not name[-1].wrapped
+        if starts_next_line or token.after == ":" or token.after.isdigit():
+            return True  # "Mr Smith\nTo", "Mr Smith To: Mrs Jones", "Mr Smith On 5 May"
+        if following is None:
+            return False
+        if not name:
+            # "Sir Or Madam" is not a name; "Ms Or Cohen", "Mr Per Lord" and
+            # "Mr To has" are.
+            return _is_capitalised(following.word) and following.word.lower() in self._name_endings
+        if self._is_title(following.word):
+            return True  # "Mr Smith Or Mrs Jones", "Mr Smith To\nMrs Jones"
+        if following.wrapped:
+            return False
+        # "Mr Smith On Behalf Of", but "Ms Nguyen Thi My Linh", "Mr Kenneth To SC"
+        # and "MR MINH TO V ACME".
+        return (
+            token.word.lower() != "my"
+            and _is_capitalised(following.word)
+            and following.word.upper() not in ("V", "VS")
+            and not (following.word.lower() in _POST_NOMINALS and not following.word.istitle())
+        )
 
     def _find_organisations(self, text: str) -> list[tuple[int, int]]:
         """Find company names ending in a legal form ("Acme Trading Ltd")."""
@@ -814,15 +891,21 @@ class Anonymiser:
                 ]
                 if links:
                     first = links[0] + 1
-            # "MR ADAM CARTER V DELTA FREIGHT LIMITED": the company follows "v"
-            # ("Henry V Ltd" is one name).
-            versus = [
-                i
-                for i, w in enumerate(words)
-                if titles and i > titles[0] and w.lower().rstrip(".") in ("v", "vs")
-            ]
-            if versus:
-                first = max(first, versus[-1] + 1)
+            # The company follows "v" when a party comes before it ("MR ADAM
+            # CARTER V DELTA LIMITED", "Claimant V DELTA LIMITED", "ACME LIMITED V
+            # DELTA LIMITED"); "Henry V Ltd" and "Class V Holdings Ltd" are names.
+            for i in range(first, len(words) - 1):
+                if words[i].lower().rstrip(".") not in ("v", "vs"):
+                    continue
+                if i == first:
+                    party_before = self._party_before(text, match.start() + tokens[i].start())
+                else:
+                    party_before = any(
+                        self._is_title(w.rstrip(".")) or w.lower().rstrip(".,") in self._parties
+                        for w in words[first:i]
+                    )
+                if party_before:
+                    first = i + 1
             # Drop sentence starters ("Yesterday Acme Ltd").
             while first < len(words) - 1 and words[first].lower() in _ORG_LEADING_WORDS:
                 first += 1
@@ -833,11 +916,29 @@ class Anonymiser:
                     first = of_index + 1
             if first >= len(words) - 1:
                 continue
+            # An ambiguous legal form at the start of a line ("Definitions\n
+            # Corporation means", "Attorney General\nAG's") ends a company name
+            # only after two words of it, or before another legal form.
+            line_break = match.group(0).rfind("\n")
+            if line_break != -1:
+                wrapped = match.group(0)[line_break + 1 :].split()
+                before = [t for t in tokens[first:] if t.start() < line_break]
+                if (
+                    wrapped[0].rstrip(".").lower() in _AMBIGUOUS_ORG_SUFFIXES
+                    and len(wrapped) == 1
+                    and (len(before) < 2 or text.startswith(("'", "’"), match.end()))
+                ):
+                    continue
             start = match.start() + tokens[first].start()
             if _is_public_body(text[start : match.end()]):
                 continue
             spans.append((start, match.end()))
         return spans
+
+    def _party_before(self, text: str, position: int) -> bool:
+        """True if the word before position ends a party: "ACME LIMITED", "Claimant"."""
+        previous = re.search(r"([\w.]+)[^\w\n]*\Z", text[max(0, position - 40) : position])
+        return previous is not None and previous.group(1).lower().rstrip(".") in self._parties
 
     def _get_replacement(self, original: str, entity_type: EntityType) -> str:
         """Get or create replacement for entity."""
@@ -856,6 +957,11 @@ class Anonymiser:
             self._lookup[key] = replacement
             self._mapping.setdefault(original, replacement)
         return replacement
+
+
+def _full_words(name: list[_NameToken]) -> int:
+    """Words of a name other than initials and particles."""
+    return sum(len(token.word) > 1 and not token.word.islower() for token in name)
 
 
 def _trim_name(name: list[_NameToken]) -> list[_NameToken]:

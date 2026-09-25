@@ -15,15 +15,15 @@ repos:
   # Uses the ruff installed by the dev extra, so hooks and CI agree.
   - repo: local
     hooks:
-      # Markdown too: ruff checks and formats Python code blocks in .md files,
-      # as `ruff check .` and `ruff format --check .` do in CI.
       - id: ruff-check
         name: ruff check
         entry: ruff check --fix
         language: system
-        types_or: [python, pyi, markdown]
+        types_or: [python, pyi]
+      # Includes .md files: ruff formats their Python code blocks, as
+      # `ruff format --check .` does in CI.
       - id: ruff-format
         name: ruff format
         entry: ruff format
         language: system
-        types_or: [python, pyi, markdown]
+        files: \.(py|pyi|md)$

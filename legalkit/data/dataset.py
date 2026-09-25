@@ -387,7 +387,7 @@ class LegalDataset:
         jurisdiction: str = "uk",
         normalise_citations: bool = True,
         preserve_case_names: bool = True,
-        keep_metadata: Iterable[str] = ("document_id",),
+        keep_metadata: str | Iterable[str] = (),
         **processor_kwargs: Any,
     ) -> "LegalDataset":
         """
@@ -399,16 +399,18 @@ class LegalDataset:
         sample. The PII mapping itself is never stored in the dataset.
 
         Identifiers are kept as they are, so documents stay distinct: the
-        ``source`` of each sample and the metadata keys in ``keep_metadata``.
-        Don't put personal data in file names or document IDs.
+        ``source`` of each sample, ``metadata["document_id"]`` and the
+        metadata keys in ``keep_metadata``. Don't put personal data in file
+        names or document IDs.
 
         Args:
             anonymise: Replace personal data with placeholders.
             jurisdiction: Jurisdiction for citation parsing.
             normalise_citations: Standardise case citation formatting.
             preserve_case_names: Keep party names inside case citations.
-            keep_metadata: Metadata keys left unchanged when anonymising, such
-                as identifiers you pass to ``split(group_by=...)``.
+            keep_metadata: Further metadata keys to leave unchanged when
+                anonymising, such as identifiers you pass to
+                ``split(group_by=...)``.
             **processor_kwargs: Other LegalPreprocessor options.
 
         Returns:
@@ -422,7 +424,9 @@ class LegalDataset:
             **processor_kwargs,
         )
         anonymiser = processor.anonymiser
-        kept = frozenset(keep_metadata)
+        kept = {"document_id"} | (
+            {keep_metadata} if isinstance(keep_metadata, str) else set(keep_metadata)
+        )
         for sample in self.samples:
             if anonymiser is not None:
                 anonymiser.reset()  # one mapping per sample
@@ -628,19 +632,26 @@ def read_json(path: Path) -> list[tuple[int, dict[str, Any]]]:
 
 
 def _anonymise_values(value: Any, anonymise: Callable[[str], str]) -> Any:
-    """Anonymise every string in value, including inside lists, tuples and dicts."""
+    """
+    Anonymise every string in value, including dict keys and the contents of
+    lists, tuples, sets and dicts, keeping container types where possible.
+    """
     if isinstance(value, str):
         return anonymise(value) if value else value
     if isinstance(value, dict):
         cleaned = copy.copy(value)  # keeps OrderedDict and defaultdict types
+        cleaned.clear()
         for key, item in value.items():
-            cleaned[key] = _anonymise_values(item, anonymise)
+            cleaned[_anonymise_values(key, anonymise)] = _anonymise_values(item, anonymise)
         return cleaned
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list, tuple, set, frozenset)):
         items = [_anonymise_values(item, anonymise) for item in value]
-        if isinstance(value, list):
-            return items
-        return type(value)(*items) if hasattr(value, "_fields") else tuple(items)
+        if hasattr(value, "_fields"):  # a namedtuple
+            return type(value)(*items)
+        try:
+            return type(value)(items)
+        except TypeError:  # a subclass with its own constructor
+            return list(items) if isinstance(value, list) else tuple(items)
     return value
 
 
