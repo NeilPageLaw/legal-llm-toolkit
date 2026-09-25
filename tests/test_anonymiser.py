@@ -487,3 +487,92 @@ class TestThirdReviewRegressions:
     )
     def test_courts_after_numbers_are_not_addresses(self, text):
         assert anonymised(text) == text
+
+
+class TestFourthReviewRegressions:
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("He wrote: 'Mr Smith has not paid.'", "He wrote: '[PERSON_1] has not paid.'"),
+            ("the defendant ('Mr Smith')", "the defendant ('[PERSON_1]')"),
+            ("Claimant-Mr Smith", "Claimant-[PERSON_1]"),
+            ("Mr John V. Smith gave evidence.", "[PERSON_1] gave evidence."),
+            ("Mr Per Svensson gave evidence.", "[PERSON_1] gave evidence."),
+            ("Mr To Kwan-hang attended.", "[PERSON_1] attended."),
+            ("Ms Or Cohen signed.", "[PERSON_1] signed."),
+            ("Mr Minh To said so.", "[PERSON_1] said so."),
+            ("Mr Smith In Person", "[PERSON_1] In Person"),
+            ("mr SMITH attended", "[PERSON_1] attended"),
+            ("Mr Peter Lord QC appeared.", "[PERSON_1] QC appeared."),
+            ("Mr David Lord MP spoke.", "[PERSON_1] MP spoke."),
+        ],
+    )
+    def test_names(self, text, expected):
+        assert anonymised(text) == expected
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            (
+                "Cross-examined by Mr\nSmith: Did you sign it?",
+                "Cross-examined by [PERSON_1]: Did you sign it?",
+            ),
+            ("by Dr\nPaul J. Brown\nClaimant", "by [PERSON_1]\nClaimant"),
+            ("Evidence of Mr John\nSmith: he denied it.", "Evidence of [PERSON_1]: he denied it."),
+            (
+                "I spoke to Dr Sarah\nPage who examined me.",
+                "I spoke to [PERSON_1] who examined me.",
+            ),
+            (
+                "A letter from Mr Smith.\nMr Smith\nHe replied the next day.",
+                "A letter from [PERSON_1].\n[PERSON_1]\nHe replied the next day.",
+            ),
+        ],
+    )
+    def test_names_across_lines(self, text, expected):
+        assert anonymised(text) == expected
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            (
+                "The Hongkong and Shanghai Banking\nCorporation Limited lent the money.",
+                "The [ORGANISATION_1] lent the money.",
+            ),
+            (
+                "The contract with Deutsche Handels\nAG was terminated.",
+                "The contract with [ORGANISATION_1] was terminated.",
+            ),
+            ("Philips Lighting\nN.V. and Acme", "[ORGANISATION_1] and Acme"),
+            ("Acme Trading\nLimited Company number 12345", "[ORGANISATION_1] number 12345"),
+            ('Acme Trading\nLimited "the Seller"', '[ORGANISATION_1] "the Seller"'),
+            ("Henry V Ltd supplied the goods.", "[ORGANISATION_1] supplied the goods."),
+            ("Class V Holdings Ltd agreed.", "[ORGANISATION_1] agreed."),
+            ("LORD AND TAYLOR LLC", "[ORGANISATION_1]"),
+            ("LORD & TAYLOR LLC", "[ORGANISATION_1]"),
+        ],
+    )
+    def test_organisations(self, text, expected):
+        assert anonymised(text) == expected
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("Mr John Smith\n1 Crown Court\nLondon", "[PERSON_1]\n[ADDRESS_1]\nLondon"),
+            ("She lives at 1 Crown Court.", "She lives at [ADDRESS_1]."),
+            ("22 Admiralty Court (rear entrance)", "[ADDRESS_1] (rear entrance)"),
+            ("before 5 Crown Court judges", "before 5 Crown Court judges"),
+        ],
+    )
+    def test_court_named_buildings(self, text, expected):
+        assert anonymised(text) == expected
+
+    def test_titles_can_be_customised(self):
+        class WithRabbi(Anonymiser):
+            TITLES = Anonymiser.TITLES | {"Rabbi"}
+
+        class WithoutLord(Anonymiser):
+            TITLES = Anonymiser.TITLES - {"Lord"}
+
+        assert WithRabbi().anonymise("Rabbi Jonathan Sacks spoke.").text == "[PERSON_1] spoke."
+        assert WithoutLord().anonymise("Lord Reed said so.").text == "Lord Reed said so."

@@ -41,7 +41,8 @@ All notable changes to this project are documented here. The format follows
 
 - `LegalDataset` and `LegalSample` with loaders for directories, JSONL, JSON and Hugging Face
   datasets, and `preprocess`, `chunk`, `deduplicate` and `split(group_by=...)`. Anonymising a
-  dataset covers instructions, responses and metadata, with one mapping per sample. Chunks record a
+  dataset covers instructions, responses and metadata, with one mapping per sample;
+  identifiers named in `keep_metadata` (default `document_id`) are kept. Chunks record a
   `document_id`, so `split(group_by="document_id")` keeps each document in one split; records
   are labelled with their file and line (`cases.jsonl#12`).
 - Citation grounding check (`LegalMetrics.evaluate_grounding`) that flags cited authorities

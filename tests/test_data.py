@@ -445,3 +445,32 @@ class TestThirdReviewRegressions:
         assert dataset[0].instruction == "Advise [PERSON_1]."
         assert dataset[1].instruction == "Advise [PERSON_1]."
         assert dataset[1].response == "[PERSON_1]."
+
+
+class TestFourthReviewRegressions:
+    def test_metadata_keeps_its_container_types(self):
+        from collections import OrderedDict, namedtuple
+
+        Party = namedtuple("Party", "name role")
+        sample = LegalSample(
+            text="Mr John Smith signed.",
+            metadata={
+                "party": Party("Mr John Smith", "claimant"),
+                "notes": OrderedDict(first="Mrs Jane Doe"),
+            },
+        )
+        metadata = LegalDataset([sample]).preprocess(anonymise=True)[0].metadata
+        assert metadata["party"] == Party("[PERSON_1]", "claimant")
+        assert metadata["notes"] == OrderedDict(first="[PERSON_2]")
+        assert type(metadata["notes"]) is OrderedDict
+
+    def test_keep_metadata_keys(self):
+        refs = ["CO/1234/2020", "HC-2014-000123"]
+        samples = [LegalSample(text="Text.", metadata={"case_ref": ref}) for ref in refs]
+        kept = LegalDataset(samples).preprocess(
+            anonymise=True, keep_metadata=("document_id", "case_ref")
+        )
+        assert [s.metadata["case_ref"] for s in kept] == refs
+        samples = [LegalSample(text="Text.", metadata={"case_ref": ref}) for ref in refs]
+        default = LegalDataset(samples).preprocess(anonymise=True)
+        assert [s.metadata["case_ref"] for s in default] == ["[CASE_NUMBER_1]"] * 2

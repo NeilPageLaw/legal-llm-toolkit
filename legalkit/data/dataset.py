@@ -6,6 +6,7 @@ document (for continued pre-training) or an instruction/response pair (for
 instruction tuning), where ``text`` holds the supporting document.
 """
 
+import copy
 import hashlib
 import json
 import logging
@@ -386,6 +387,7 @@ class LegalDataset:
         jurisdiction: str = "uk",
         normalise_citations: bool = True,
         preserve_case_names: bool = True,
+        keep_metadata: Iterable[str] = ("document_id",),
         **processor_kwargs: Any,
     ) -> "LegalDataset":
         """
@@ -397,14 +399,16 @@ class LegalDataset:
         sample. The PII mapping itself is never stored in the dataset.
 
         Identifiers are kept as they are, so documents stay distinct: the
-        ``source`` of each sample and ``metadata["document_id"]``. Don't put
-        personal data in file names or document IDs.
+        ``source`` of each sample and the metadata keys in ``keep_metadata``.
+        Don't put personal data in file names or document IDs.
 
         Args:
             anonymise: Replace personal data with placeholders.
             jurisdiction: Jurisdiction for citation parsing.
             normalise_citations: Standardise case citation formatting.
             preserve_case_names: Keep party names inside case citations.
+            keep_metadata: Metadata keys left unchanged when anonymising, such
+                as identifiers you pass to ``split(group_by=...)``.
             **processor_kwargs: Other LegalPreprocessor options.
 
         Returns:
@@ -418,6 +422,7 @@ class LegalDataset:
             **processor_kwargs,
         )
         anonymiser = processor.anonymiser
+        kept = frozenset(keep_metadata)
         for sample in self.samples:
             if anonymiser is not None:
                 anonymiser.reset()  # one mapping per sample
@@ -436,7 +441,7 @@ class LegalDataset:
                         setattr(sample, attr, clean(value))
                 # Metadata can hold personal data too (e.g. a rendered prompt).
                 sample.metadata = {
-                    key: value if key == "document_id" else _anonymise_values(value, clean)
+                    key: value if key in kept else _anonymise_values(value, clean)
                     for key, value in sample.metadata.items()
                 }
                 sample.metadata["anonymised"] = True
@@ -627,9 +632,15 @@ def _anonymise_values(value: Any, anonymise: Callable[[str], str]) -> Any:
     if isinstance(value, str):
         return anonymise(value) if value else value
     if isinstance(value, dict):
-        return {key: _anonymise_values(item, anonymise) for key, item in value.items()}
+        cleaned = copy.copy(value)  # keeps OrderedDict and defaultdict types
+        for key, item in value.items():
+            cleaned[key] = _anonymise_values(item, anonymise)
+        return cleaned
     if isinstance(value, (list, tuple)):
-        return type(value)(_anonymise_values(item, anonymise) for item in value)
+        items = [_anonymise_values(item, anonymise) for item in value]
+        if isinstance(value, list):
+            return items
+        return type(value)(*items) if hasattr(value, "_fields") else tuple(items)
     return value
 
 
