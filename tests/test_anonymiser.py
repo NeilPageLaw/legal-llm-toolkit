@@ -381,3 +381,109 @@ class TestSecondReviewRegressions:
             anonymised("She lives at 1 Crown Court, London.") == "She lives at [ADDRESS_1], London."
         )
         assert anonymised("3 County Court Road") == "[ADDRESS_1]"
+
+
+class TestThirdReviewRegressions:
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("MR JOHN SMITH MRS JANE DOE", "[PERSON_1] [PERSON_2]"),
+            ("Mrs Ann Lee\nMr Bob Cole signed it.", "[PERSON_1]\n[PERSON_2] signed it."),
+            ("Mrs Jones Mr. Smith", "[PERSON_1] [PERSON_2]"),
+            ("Professor Sir John Smith said", "[PERSON_1] said"),
+            ("I spoke to Mr Peter Lord.", "I spoke to [PERSON_1]."),
+            ("Lord Denning MR said", "[PERSON_1] MR said"),
+            ("MR ADAM CARTER KC", "[PERSON_1] KC"),
+        ],
+    )
+    def test_where_names_end(self, text, expected):
+        assert anonymised(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "MR WEI HE",
+            "MRS LI YOU",
+            "MR NEIL PAGE",
+            "MS AN NGUYEN",
+            "Mr José Álvarez",
+            "Ms Zoë Müller",
+            "Mr Łukasz Nowak",
+            "Mr John SMITH",
+            "Mr de Souza",
+            "Mr van der Berg",
+            "Mr d’Souza",
+            "Mr al-Hassan",
+            "Mr Justin Judge",
+            "Mrs Sarah Justice",
+            "Mr Ma",
+            "Mr John Smith",
+            "Mr John\r\nSmith",
+        ],
+    )
+    def test_whole_name_is_anonymised(self, text):
+        assert anonymised(text) == "[PERSON_1]"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Dear Sir\nThank you for your letter.",
+            "Dear Sir\nWe act for the tenant.",
+            "Dear Sir\nRe: Lease of 12 Park Road",
+            "Dear Sir\nPlease find enclosed the lease.",
+            "It was noted by Mr\nThe court then rose.",
+            "Yes, my Lord. The claimant accepts that.",
+            "My Lady I am grateful.",
+            "The Lord Chancellor may make rules.",
+            "Rent is due on Lady Day.",
+            "Mr Speaker, I beg to move.",
+            "The Lord Mayor of London attended.",
+            "The hearing was held by MS Teams.",
+        ],
+    )
+    def test_salutations_and_offices_are_not_names(self, text):
+        # "Re: Lease of 12 Park Road" holds an address; nothing else changes.
+        assert anonymised(text, entity_types=["person"]) == text
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("Mr John Smith\nAcme Holdings plc", "[PERSON_1]\n[ORGANISATION_1]"),
+            (
+                "Present: Mr John Smith\nApologies: Mrs Jane Doe",
+                "Present: [PERSON_1]\nApologies: [PERSON_2]",
+            ),
+            ("Mr John Smith\nHead of Legal", "[PERSON_1]\nHead of Legal"),
+            ("MR SMITH OF DELTA LOGISTICS LTD", "[PERSON_1] OF [ORGANISATION_1]"),
+            ("MR ADAM CARTER V DELTA FREIGHT LIMITED", "[PERSON_1] V [ORGANISATION_1]"),
+            ("Électricité de France SA agreed.", "[ORGANISATION_1] agreed."),
+            ("Acme Trading Ltd agreed.", "[ORGANISATION_1] agreed."),
+            ("Acme Trading\r\nLimited and the tenant", "[ORGANISATION_1] and the tenant"),
+        ],
+    )
+    def test_people_and_companies_on_neighbouring_lines(self, text, expected):
+        assert anonymised(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Director\nCompany Secretary",
+            "Definitions\nCompany means Acme.",
+            "12. WARRANTY\nLimited Warranty. The Supplier warrants",
+        ],
+    )
+    def test_labels_are_not_companies(self, text):
+        assert anonymised(text) == text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "the 2019 High Court\nproceedings",
+            "a 2019 County Court Judgment",
+            "the 2019 High Court (Chancery Division)",
+            "the 2019 High Court, Court of Appeal and Supreme Court decisions",
+            "Order 26 County Court Rules",
+        ],
+    )
+    def test_courts_after_numbers_are_not_addresses(self, text):
+        assert anonymised(text) == text

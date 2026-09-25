@@ -395,3 +395,53 @@ class TestSecondReviewRegressions:
         assert "John Smith" not in record
         assert "12 High Street" not in record
         assert dataset[0].metadata["tags"] == ["[PERSON_1]", "arrears"]
+
+
+class TestThirdReviewRegressions:
+    @pytest.mark.parametrize("key", ["output", "answer", "target", "completion", "response"])
+    def test_explicit_text_key_wins_over_response_aliases(self, key):
+        sample = LegalSample.from_dict({key: "The judgment text."}, text_key=key)
+        assert sample.text == "The judgment text."
+        assert sample.response is None
+
+    def test_anonymising_keeps_document_ids_distinct(self):
+        dataset = LegalDataset(
+            [
+                LegalSample(
+                    text="Mr John Smith signed.", metadata={"document_id": "Mr Adam Carter"}
+                ),
+                LegalSample(text="Mrs Jane Doe signed.", metadata={"document_id": "Mrs Jane Doe"}),
+            ]
+        ).preprocess(anonymise=True)
+        assert [s.metadata["document_id"] for s in dataset] == ["Mr Adam Carter", "Mrs Jane Doe"]
+
+    def test_anonymising_covers_nested_metadata(self):
+        sample = LegalSample(
+            text="",
+            instruction="Advise Mr John Smith.",
+            response="Mr John Smith should settle.",
+            metadata={
+                "parties": [{"name": "Mr John Smith"}, {"name": "Acme Trading Ltd"}],
+                "extra": {"note": "Call Mrs Jane Doe", "pages": 3},
+                "refs": ("Mrs Jane Doe", None),
+            },
+        )
+        dataset = LegalDataset([sample]).preprocess(anonymise=True)
+        assert dataset[0].instruction == "Advise [PERSON_1]."
+        assert dataset[0].metadata["parties"] == [
+            {"name": "[PERSON_1]"},
+            {"name": "[ORGANISATION_1]"},
+        ]
+        assert dataset[0].metadata["extra"] == {"note": "Call [PERSON_2]", "pages": 3}
+        assert dataset[0].metadata["refs"] == ("[PERSON_2]", None)
+
+    def test_each_sample_gets_its_own_mapping(self):
+        dataset = LegalDataset(
+            [
+                LegalSample(text="", instruction="Advise Mr John Smith.", metadata={"a": "Mr X Y"}),
+                LegalSample(text="", instruction="Advise Mrs Jane Doe.", response="Mrs Jane Doe."),
+            ]
+        ).preprocess(anonymise=True)
+        assert dataset[0].instruction == "Advise [PERSON_1]."
+        assert dataset[1].instruction == "Advise [PERSON_1]."
+        assert dataset[1].response == "[PERSON_1]."

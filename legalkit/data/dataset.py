@@ -132,11 +132,11 @@ class LegalSample:
             **defaults: document_type, jurisdiction or source.
         """
         record = dict(record)
+        # An explicit text field wins over the aliases ("output", "answer").
+        text = _as_text(record.pop(text_key, None)) if text_key is not None else None
         instruction = _pop_first(record, INSTRUCTION_KEYS)
         response = _pop_first(record, RESPONSE_KEYS)
-        if text_key is not None:
-            text = _as_text(record.pop(text_key, None))
-        else:
+        if text_key is None:
             # In instruction data a "text" column is often the fully rendered
             # prompt and answer; the context is "input" (kept in metadata otherwise).
             text_keys = CONTEXT_KEYS if instruction is not None else TEXT_KEYS
@@ -391,10 +391,14 @@ class LegalDataset:
         """
         Clean every sample in place with LegalPreprocessor.
 
-        When anonymising, the instruction, response and text values in
-        metadata are anonymised with the same mapping as the text, so
-        placeholders stay consistent within each sample. The PII mapping
-        itself is never stored in the dataset.
+        When anonymising, the instruction, response and every text value in
+        metadata (including inside lists and dicts) are anonymised with the
+        same mapping as the text, so placeholders stay consistent within each
+        sample. The PII mapping itself is never stored in the dataset.
+
+        Identifiers are kept as they are, so documents stay distinct: the
+        ``source`` of each sample and ``metadata["document_id"]``. Don't put
+        personal data in file names or document IDs.
 
         Args:
             anonymise: Replace personal data with placeholders.
@@ -413,31 +417,28 @@ class LegalDataset:
             preserve_case_names=preserve_case_names,
             **processor_kwargs,
         )
+        anonymiser = processor.anonymiser
         for sample in self.samples:
-            reset = True
+            if anonymiser is not None:
+                anonymiser.reset()  # one mapping per sample
             if sample.text:
                 result = processor.process(sample.text)
                 sample.text = result.processed
                 sample.metadata["citation_count"] = len(result.citations)
-                reset = False
-            if processor.anonymiser is not None:
-                anonymiser = processor.anonymiser
+            if anonymiser is not None:
+
+                def clean(value: str) -> str:
+                    return anonymiser.anonymise(value, reset=False).text
+
                 for attr in ("instruction", "response"):
                     value = getattr(sample, attr)
                     if value:
-                        setattr(sample, attr, anonymiser.anonymise(value, reset=reset).text)
-                        reset = False
+                        setattr(sample, attr, clean(value))
                 # Metadata can hold personal data too (e.g. a rendered prompt).
-                for key, value in sample.metadata.items():
-                    if isinstance(value, str) and value:
-                        sample.metadata[key] = anonymiser.anonymise(value, reset=reset).text
-                        reset = False
-                    elif (
-                        isinstance(value, list) and value and all(isinstance(v, str) for v in value)
-                    ):
-                        sample.metadata[key] = [
-                            anonymiser.anonymise(v, reset=False).text for v in value
-                        ]
+                sample.metadata = {
+                    key: value if key == "document_id" else _anonymise_values(value, clean)
+                    for key, value in sample.metadata.items()
+                }
                 sample.metadata["anonymised"] = True
             if sample.jurisdiction is None:
                 sample.jurisdiction = jurisdiction
@@ -619,6 +620,17 @@ def read_json(path: Path) -> list[tuple[int, dict[str, Any]]]:
     if not isinstance(data, list) or not all(isinstance(r, dict) for r in data):
         raise ValueError(f"{path}: expected a list of JSON objects")
     return list(enumerate(data, start=1))
+
+
+def _anonymise_values(value: Any, anonymise: Callable[[str], str]) -> Any:
+    """Anonymise every string in value, including inside lists, tuples and dicts."""
+    if isinstance(value, str):
+        return anonymise(value) if value else value
+    if isinstance(value, dict):
+        return {key: _anonymise_values(item, anonymise) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_anonymise_values(item, anonymise) for item in value)
+    return value
 
 
 def _pop_first(record: dict[str, Any], keys: Iterable[str]) -> Any:

@@ -233,15 +233,19 @@ class LegalTrainingConfig:
 
         A setting listed under "derived_settings" counts as chosen when its
         value differs from what the saved task, method and model give (recorded
-        under "derived_from"), i.e. when someone edited it after saving.
+        under "derived_from"), i.e. when someone edited it after saving. A
+        config saved without "derived_from" cannot tell, so every listed
+        setting is derived again.
         """
         names = {f.name for f in fields(cls) if f.init}
         settings = {k: v for k, v in config_dict.items() if k in names}
         derived = set(config_dict.get("derived_settings", [])) & set(settings)
         if not derived:
             return settings
+        if "derived_from" not in config_dict:
+            return {k: v for k, v in settings.items() if k not in derived}
         inputs = {k: settings[k] for k in DERIVATION_INPUTS if k in settings}
-        inputs.update(config_dict.get("derived_from", {}))
+        inputs.update(config_dict["derived_from"])
         baseline = cls(**inputs)
         return {
             k: v

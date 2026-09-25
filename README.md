@@ -97,7 +97,9 @@ python examples/quickstart.py
 from legalkit.preprocess import CitationParser
 
 parser = CitationParser(jurisdiction="uk")
-text = "As held in Smith v Jones [2024] UKSC 15 at [42], applying section 1 of the Companies Act 2006"
+text = (
+    "As held in Smith v Jones [2024] UKSC 15 at [42], applying section 1 of the Companies Act 2006"
+)
 
 for citation in parser.parse(text):
     print(citation.normalised, citation.parties, citation.paragraph)
@@ -111,8 +113,10 @@ for citation in parser.parse(text):
 from legalkit.preprocess import Anonymiser
 
 anon = Anonymiser()
-result = anon.anonymise("Mr John Smith of 12 High Street, London SW1A 1AA relied on "
-                        "Caparo Industries plc v Dickman [1990] 2 AC 605.")
+result = anon.anonymise(
+    "Mr John Smith of 12 High Street, London SW1A 1AA relied on "
+    "Caparo Industries plc v Dickman [1990] 2 AC 605."
+)
 print(result.text)
 # [PERSON_1] of [ADDRESS_1], London [ADDRESS_2] relied on Caparo Industries plc v Dickman [1990] 2 AC 605.
 
@@ -140,7 +144,7 @@ print(len(result.chunks), "chunks")
 ```python
 from legalkit.data import load_legal_corpus
 
-dataset = load_legal_corpus("./my_documents/", jurisdiction="uk")   # or a .jsonl file or HF id
+dataset = load_legal_corpus("./my_documents/", jurisdiction="uk")  # or a .jsonl file or HF id
 dataset = dataset.deduplicate()
 dataset.preprocess(anonymise=True)
 chunks = dataset.chunk(chunk_size=512)
@@ -159,7 +163,7 @@ from legalkit.finetune import LegalTrainer, LegalTrainingConfig
 config = LegalTrainingConfig(
     base_model="mistralai/Mistral-7B-v0.1",
     method="qlora",
-    task="contract_review",   # 4096 tokens, 5 epochs unless you set them
+    task="contract_review",  # 4096 tokens, 5 epochs unless you set them
     jurisdiction="uk",
 )
 
@@ -195,7 +199,7 @@ from legalkit.eval import LegalMetrics
 
 metrics = LegalMetrics()
 check = metrics.evaluate_grounding(model_answer, sources=[source_document])
-print(check["ungrounded"])   # authorities cited in the answer but absent from the sources
+print(check["ungrounded"])  # authorities cited in the answer but absent from the sources
 ```
 
 ## Command Line
@@ -258,6 +262,9 @@ cannot take responsibility for how it is used:
 - **Salted placeholders are pseudonymisation, not anonymisation.** Under UK GDPR,
   pseudonymised data is still personal data (Recital 26). Keep the salt and any
   `--mapping` file secure: they re-identify the data.
+- **File names and document IDs are kept as they are.** They identify records, so
+  anonymising a dataset leaves each sample's `source` and `document_id` unchanged, and
+  both appear in exported JSONL. Use neutral file names and IDs, not client or party names.
 - **Case names in citations are kept by default** because they are public record. If a
   document concerns one of the cited cases, those names identify its parties: use
   `preserve_case_names=False` (`--anonymise-case-names` on the command line).

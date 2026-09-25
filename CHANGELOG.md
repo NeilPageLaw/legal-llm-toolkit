@@ -17,9 +17,12 @@ All notable changes to this project are documented here. The format follows
   US statutes were not recognised.
 - **Anonymisation**: "Mr Smith" and names in capitals ("MR ADAM CARTER") were not anonymised;
   names in party and signature blocks ("Mr Adam Carter\nClaimant") were skipped as legal
-  terms; organisation and address patterns swallowed whole sentences and merged separate
-  companies; overlapping matches corrupted the text; company names in preserved case
-  citations were anonymised; the `salt` option was ignored.
+  terms; accented names were cut mid-word ("Mr José Álvarez" became "[PERSON_1]é Álvarez");
+  names after a no-break space, with particles ("Mr de Souza") or with the surname in capitals
+  ("Mr John SMITH") were missed; salutations and offices ("Dear Sir", "Lord Chancellor",
+  "Lady Day") were treated as names; organisation and address patterns swallowed whole
+  sentences and merged separate companies; overlapping matches corrupted the text; company
+  names in preserved case citations were anonymised; the `salt` option was ignored.
 - **Chunking**: `chunk_size == overlap` looped forever; clause numbers were deleted and
   paragraphs glued together; chunk offsets were wrong; `min_chunk_size` was ignored.
 - **Evaluation**: citation metrics missed `[1990] 2 AC 605`, `EWCA Civ` and `U.S.` citations;
@@ -28,14 +31,17 @@ All notable changes to this project are documented here. The format follows
 - **Fine-tuning**: training failed on current transformers/TRL (`evaluation_strategy`,
   `SFTTrainer(tokenizer=...)`); explicit settings were overwritten by task defaults; a typo in
   `method` started a full fine-tune; saved configs omitted most settings; LoRA models were
-  prepared as if quantised; `anonymise_training_data` was skipped for `LegalDataset` inputs.
+  prepared as if quantised; `anonymise_training_data` was skipped for `LegalDataset` inputs;
+  full fine-tuning loaded 16-bit weights, so small updates were lost (it now keeps float32
+  weights and computes in bf16 or fp16).
 - **CLI**: `--chunk-size` was ignored and chunks were never written; long text passed to
   `citations` crashed with "File name too long".
 
 ### Added
 
 - `LegalDataset` and `LegalSample` with loaders for directories, JSONL, JSON and Hugging Face
-  datasets, and `preprocess`, `chunk`, `deduplicate` and `split(group_by=...)`. Chunks record a
+  datasets, and `preprocess`, `chunk`, `deduplicate` and `split(group_by=...)`. Anonymising a
+  dataset covers instructions, responses and metadata, with one mapping per sample. Chunks record a
   `document_id`, so `split(group_by="document_id")` keeps each document in one split; records
   are labelled with their file and line (`cases.jsonl#12`).
 - Citation grounding check (`LegalMetrics.evaluate_grounding`) that flags cited authorities

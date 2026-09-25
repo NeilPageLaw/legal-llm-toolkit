@@ -559,10 +559,10 @@ def _clean_party(party: str, first: bool) -> str:
     return " ".join(tokens)
 
 
-def _name_start(match: re.Match, name: str) -> int:
-    """Offset of a cleaned name, whose words end the match's "name" group."""
-    words = list(re.finditer(r"\S+", match["name"]))
-    return match.start("name") + words[-len(name.split())].start()
+def _name_start(match: re.Match, name: str, group: str = "name") -> int:
+    """Offset of a cleaned name, whose words end the match's group."""
+    words = list(re.finditer(r"\S+", match[group]))
+    return match.start(group) + words[-len(name.split())].start()
 
 
 def _clean_act_name(name: str) -> str:
@@ -1076,8 +1076,7 @@ class CitationParser:
                 return None
             name = re.sub(r"\s+", " ", f"{p1} v {p2}")
             # The cleaned first party is the last words of the captured one.
-            words = list(re.finditer(r"\S+", match["p1"]))
-            start = window_start + match.start("p1") + words[-len(p1.split())].start()
+            start = window_start + _name_start(match, p1, "p1")
             end = window_start + match.start("p2") + len(match["p2"].rstrip())
             return name, start, end
 

@@ -180,9 +180,12 @@ RULES = (
     _Rule(
         EntityType.ADDRESS,
         re.compile(
-            # "the 2019 High Court judgment" names a court; "1 Crown Court,
-            # London" and "3 County Court Road" are addresses.
-            rf"\b\d{{1,4}}[A-Za-z]?,?\s+(?!{_COURT_TYPES}\s+(?:Courts?|Tribunal)[ \t]+[a-z])"
+            # "the 2019 High Court judgment" and "Order 26 County Court Rules"
+            # name a court; "3 County Court Road" and "1 Crown Court, London"
+            # are addresses.
+            r"\b(?:(?P<year>(?:18|19|20)\d\d)\b|(?!(?:18|19|20)\d\d\b)\d{1,4}[A-Za-z]?),?\s+"
+            rf"(?!{_COURT_TYPES}\s+(?:Courts?|Tribunals?)\b(?![ \t]+{_STREET_TYPES}\b)"
+            r"(?(year)|(?!,[ \t]*[A-Z])))"
             rf"(?:[A-Z][a-z'’\-]+\s+){{1,3}}{_STREET_TYPES}\b"
             # Keep an abbreviation's full stop only mid-sentence ("12 High St. and").
             r"(?:\.(?=\s+[a-z,;]))?"
@@ -215,95 +218,29 @@ RULES = (
     ),
 )
 
-_TITLES = (
-    "Mr",
-    "Mrs",
-    "Ms",
-    "Miss",
-    "Mx",
-    "Dr",
-    "Prof",
-    "Professor",
-    "Sir",
-    "Dame",
-    "Lord",
-    "Lady",
-    "Rev",
-    "Revd",
-)
-_TITLE_ALTERNATION = "|".join(sorted(_TITLES, key=len, reverse=True))
-
-# Words that end a name on its line: labels ("Witness Statement", "Date:"),
-# job titles ("Partner") and legal forms. Legal roles ("Claimant",
-# "Solicitor") are added from Anonymiser.LEGAL_PRESERVE. Ordinary words that
-# are also names ("Page", "Said", "Lord") are deliberately not listed.
-_NAME_ENDING_WORDS = frozenset(
-    """
-    date dated signed signature address tel telephone email fax mobile statement exhibit
-    schedule clause section part paragraph partner director associate secretary manager
-    chairman chair officer consultant clerk trustee trustees executor executors
-    administrator administrators receiver liquidator limited ltd plc llp llc inc company
-    co corporation
-    """.split()
-)
-# Words that start a sentence or a line rather than continue a name wrapped
-# onto the next line ("Mr John Smith\nThe court held").
-_SENTENCE_START_WORDS = frozenset(
-    """
-    the this that these those an and or but if in on at to for of by with from as is was
-    has had it he she they we you dear yours thank thanks page re vs
-    """.split()
-)
-# "Lord Chief Justice" and "Mr Justice Fraser" are judicial offices.
-_JUDICIAL_OFFICE_AFTER = re.compile(r"[ \t]+(?i:justices?|judges?)\b")
-_LEGAL_FORMS = r"(?:LIMITED|LTD|PLC|LLP|LLC|INC|CO)"
-
-
-def _not_one_of(words: Iterable[str]) -> str:
-    """Negative lookahead for any of words, ignoring case."""
-    return rf"(?!(?i:{'|'.join(sorted(words, key=len, reverse=True))})\b)"
-
-
-def _titled_name_patterns(role_words: Iterable[str]) -> tuple[re.Pattern, re.Pattern]:
-    """Patterns for titled names in normal case and in capitals."""
-    roles = {word.lower() for word in role_words}
-    ending = _NAME_ENDING_WORDS | roles | {f"{word}s" for word in roles}
-
-    # A capitalised name ("Smith", "O'Brien", "McDonald", "Smith-Jones") or an initial.
-    word = r"(?:[A-Z]['’])?[A-Z][A-Za-z\-]*[a-z]"
-    token = rf"{_not_one_of(ending)}(?:{word}|[A-Z](?:\.|\b(?!['’])))"
-    # A name wrapped onto the next line continues with whole words and is
-    # followed by running text: "Mr John\nSmith said", "Mr John\nSmith QC".
-    wrapped_token = rf"{_not_one_of(ending | _SENTENCE_START_WORDS)}{word}"
-    after_wrap = rf"(?=[ \t]+(?:[a-z(]|(?!{_LEGAL_FORMS}\b)[A-Z]{{2,}}\b)|[,.;:)\]'’]|[ \t]*\Z)"
-    wrapped = rf"(?:[ \t]*\n[ \t]*{wrapped_token}(?:[ \t]+{wrapped_token}){{0,2}}{after_wrap})?"
-    titled = re.compile(
-        rf"\b(?:{_TITLE_ALTERNATION})\.?(?:[ \t]+|[ \t]*\n[ \t]*)"
-        rf"(?P<name>{token}(?:[ \t]+{token}){{0,3}}{wrapped})"
-    )
-
-    # Names in capitals, as in the heading of a judgment ("MR ADAM CARTER"),
-    # stay on one line and stop at words such as "AND".
-    upper_token = rf"{_not_one_of(ending | _SENTENCE_START_WORDS)}[A-Z][A-Z'’\-]*[A-Z]"
-    upper = re.compile(
-        rf"\b(?i:{_TITLE_ALTERNATION})\.?[ \t]+"
-        rf"(?P<name>(?:[A-Z]\.?[ \t]+){{0,2}}{upper_token}(?:[ \t]+{upper_token}){{0,2}})\b"
-    )
-    return titled, upper
-
-
+# Capital letters, including accented ones ("É", "Ł").
+_CAPITAL = "A-Z" + "".join(c for c in map(chr, range(0xC0, 0x250)) if c.isupper())
+# Space within a line, including no-break spaces ("Mr\u00a0Smith") and the
+# "\r" of a Windows line break.
+_SPACE = r"[^\S\n]"
 _ORG_SUFFIX = (
     r"(?:Limited|LIMITED|Ltd|LTD|PLC|plc|Inc|INC|LLC|LLP|L\.L\.P|Corporation|CORPORATION|"
     r"Corp|CORP|Company|COMPANY|Co|CO|GmbH|AG|SA|S\.A|NV|N\.V|BV|B\.V|SE|LP|L\.P)"
 )
-# A name ends at its first legal form ("Acme Ltd and Beta Ltd" is two
-# companies) and stays on one line.
+# A name ends at its first legal form: "Acme Ltd and Beta Ltd" is two companies.
 _ORG_SUFFIX_WORD = rf"{_ORG_SUFFIX}(?![\w\-])"  # not "Co-operative"
-_ORG_TOKEN = rf"(?!{_ORG_SUFFIX_WORD})(?:[A-Z][\w&'’\-]*|&)"
+_ORG_TOKEN = rf"(?!{_ORG_SUFFIX_WORD})(?:[{_CAPITAL}][\w&'’\-]*|&)"
+# Only an unambiguous legal form wraps onto the next line ("Acme Trading\nLimited
+# and"): a line that starts "Company means" or "Limited Warranty" is not the end
+# of a company name.
+_WRAPPED_ORG_SUFFIX = (
+    r"(?:Limited|LIMITED|Ltd|LTD|PLC|plc|LLP|LLC|Inc|INC|GmbH)(?![\w\-])"
+    rf"(?={_SPACE}*(?:\n|\Z|[,.;:)(])|{_SPACE}+[a-z])"
+)
 _ORG = re.compile(
-    rf"\b{_ORG_TOKEN}(?:[ \t]+(?:{_ORG_TOKEN}|and|of|the|for|de|du)){{0,6}}"
-    # The legal form may wrap onto the next line ("Acme Trading\nLimited").
-    rf"(?:[ \t]+|[ \t]*\n[ \t]*){_ORG_SUFFIX_WORD}(?:[ \t]+{_ORG_SUFFIX_WORD})?"
+    rf"\b{_ORG_TOKEN}(?:{_SPACE}+(?:{_ORG_TOKEN}|and|of|the|for|de|du)){{0,6}}"
+    rf"(?:{_SPACE}+{_ORG_SUFFIX_WORD}(?:{_SPACE}+{_ORG_SUFFIX_WORD})?"
+    rf"|{_SPACE}*\n{_SPACE}*{_WRAPPED_ORG_SUFFIX})"
     # Keep an abbreviation's full stop only mid-sentence ("Acme Ltd. and").
     r"(?:\.(?=\s+[a-z,;]))?"
 )
@@ -340,6 +277,136 @@ _PUBLIC_BODY_WORDS = (
     "secretary of state",
 )
 
+# Honorifics that introduce a name, in title case or capitals ("Mr", "MR").
+# Abbreviations may take a full stop ("Mr."); words may not, so "Yes, my
+# Lord. The claimant..." holds no name.
+_ABBREVIATED_TITLES = ("Mr", "Mrs", "Ms", "Mx", "Dr", "Prof", "Rev", "Revd")
+_WORD_TITLES = ("Miss", "Professor", "Sir", "Dame", "Lord", "Lady")
+_TITLES = _ABBREVIATED_TITLES + _WORD_TITLES
+_TITLE_WORDS = frozenset(title.lower() for title in _TITLES)
+_ABBREVIATION_WORDS = frozenset(title.lower() for title in _ABBREVIATED_TITLES)
+
+
+def _title_alternation(titles: Iterable[str]) -> str:
+    forms = {form for title in titles for form in (title, title.upper())}
+    return "|".join(sorted(forms, key=len, reverse=True))
+
+
+_TITLE = re.compile(
+    rf"(?<![\w'’\-])(?:(?:{_title_alternation(_ABBREVIATED_TITLES)})\.?"
+    rf"|{_title_alternation(_WORD_TITLES)})(?![\w'’\-])"
+)
+# "Dear Sir" and "My Lord" end their line: the next line is not a name.
+_SALUTATION = re.compile(rf"(?i:\b(?:dear|my)){_SPACE}+\Z")
+
+# A word of a name: letters with inner apostrophes or hyphens ("O'Brien",
+# "Smith-Jones", "José"), without a possessive "'s".
+_NAME_WORD = re.compile(r"[^\W\d_]+(?:['’\-](?!s\b)[^\W\d_]+)*")
+_NAME_GAP = re.compile(rf"{_SPACE}*\n{_SPACE}*|{_SPACE}+")
+# An elision or article before the capital: "d'Souza", "al-Hassan".
+_NAME_PREFIX = re.compile(r"^(?:[a-z]{1,2}['’]|(?:al|el)-)")
+
+# Words that end a name: labels ("Witness Statement", "Date:"), job titles
+# ("Partner") and legal forms. Legal roles ("Claimant", "Solicitor") are
+# added from Anonymiser.LEGAL_PRESERVE. Ordinary words that are also names
+# ("Page", "Said", "Lord", "Judge") are deliberately not listed.
+_NAME_ENDING_WORDS = frozenset(
+    """
+    date dated signed signature address tel telephone email fax mobile statement exhibit
+    schedule clause section part paragraph partner director associate secretary manager
+    chairman chair officer consultant clerk trustee trustees executor executors
+    administrator administrators receiver liquidator limited ltd plc llp llc inc company
+    co corporation
+    """.split()
+)
+# Post-nominals end a name when not in title case ("Mr John Smith KC", "Lord
+# Denning MR"), so the surnames Ma and Sc are still names.
+_POST_NOMINALS = frozenset(
+    """
+    qc kc sc cbe obe mbe kbe dbe gbe mp mep msp jp frcs frcp mrcs mrcp phd dphil llb llm bcl
+    mr lj ljj jj cj vc psc dpsc jsc
+    """.split()
+)
+# Function words are never part of a name ("MR SMITH AND MRS JONES", "MR ADAM
+# CARTER V DELTA"). Pronouns that are also surnames (He, You, An) are not listed.
+_FUNCTION_WORDS = frozenset(
+    """
+    the this that these those and or nor but if of to in on at as by for from with into
+    upon is was are were has had it its we they them their our his my me us v vs re per via
+    """.split()
+)
+# Words that open a line of a letter or list rather than continue a name
+# wrapped onto it ("Mr John Smith\nThank you", "Mr John Smith\nHead of Legal").
+_LINE_START_WORDS = frozenset(
+    """
+    dear yours thank thanks please regarding subject further following yes no note
+    instructed head
+    """.split()
+)
+# Offices, not names: "Mr Justice Fraser", "Mr Speaker", "Lord Chief Justice",
+# "Lord Chancellor", and the quarter day "Lady Day".
+_OFFICES = frozenset({"justice", "justices", "speaker", "president"})
+_LORD_OFFICES = frozenset(
+    """
+    chief chancellor advocate president ordinary mayor lieutenant speaker privy high
+    provost chamberlain steward commissioner commissioners warden great bishop day
+    """.split()
+)
+_NAME_PARTICLES = frozenset(
+    "van von de da di du del della der den la le al el bin ibn ap ter ten dos das".split()
+)
+# What may follow a name wrapped onto a new line: running text, not a label
+# ("Apologies:"), a heading or a company ("Mr John Smith\nAcme Holdings plc").
+_WRAPPED_NAME_FOLLOWER = re.compile(
+    rf"{_SPACE}*(?:\Z|\()|[,.;!?)\]'’\"”]|{_SPACE}+[—–-]{_SPACE}"
+    rf"|{_SPACE}+(?!{_ORG_SUFFIX_WORD})[a-z]"
+    rf"|{_SPACE}+(?i:{'|'.join(sorted(_POST_NOMINALS))})\b"
+)
+
+
+@dataclass(frozen=True)
+class _NameToken:
+    word: str
+    start: int
+    end: int  # after an initial's full stop
+    wrapped: bool  # on a line after the title
+    dotted: bool  # followed by a full stop ("J.", "Mr.")
+
+
+def _name_tokens(text: str, position: int, may_wrap: bool, limit: int = 8) -> list[_NameToken]:
+    """The words after a title, up to a gap that cannot fall inside a name."""
+    tokens: list[_NameToken] = []
+    wrapped = False
+    while len(tokens) < limit:
+        gap = _NAME_GAP.match(text, position)
+        if gap is not None:
+            if "\n" in gap.group():
+                if wrapped or not may_wrap:
+                    break
+                wrapped = True
+            position = gap.end()
+        elif not (tokens and text[tokens[-1].end - 1] == "."):
+            break  # words need a space between them, except initials ("J.R. Smith")
+        match = _NAME_WORD.match(text, position)
+        if match is None:
+            break
+        end = match.end()
+        dotted = text.startswith(".", end)
+        if dotted and len(match.group()) == 1:
+            end += 1
+        tokens.append(_NameToken(match.group(), match.start(), end, wrapped, dotted))
+        position = end
+    return tokens
+
+
+def _is_capitalised(word: str) -> bool:
+    """True for "Smith", "SMITH", "McDonald", "José", "d'Souza" and "al-Hassan"."""
+    return _NAME_PREFIX.sub("", word)[:1].isupper()
+
+
+def _is_title(word: str) -> bool:
+    return word.lower() in _TITLE_WORDS and (word.istitle() or word.isupper())
+
 
 class Anonymiser:
     """
@@ -358,9 +425,10 @@ class Anonymiser:
     Limitations:
         Rule-based detection finds titled names ("Mr Smith", "Dr Jane Doe")
         and companies with a legal-form suffix ("Acme Ltd"). Untitled names
-        ("Jane Smith") need a named-entity model: pass ``ner="en_core_web_sm"``
-        (requires spaCy) or your own detector. No automated tool guarantees
-        anonymisation; review output before relying on it.
+        ("Jane Smith"), and names in scripts without capital letters, need a
+        named-entity model: pass ``ner="en_core_web_sm"`` (requires spaCy) or
+        your own detector. No automated tool guarantees anonymisation; review
+        output before relying on it.
 
         Case names inside citations are public record, but if a document
         concerns one of the cited cases the preserved names can identify its
@@ -442,7 +510,10 @@ class Anonymiser:
 
         self._detector: Detector | None = _spacy_detector(ner) if isinstance(ner, str) else ner
         self._citation_parser = CitationParser()
-        self._name_patterns = _titled_name_patterns(self.LEGAL_PRESERVE)
+        # "Judge" and "Justice" are surnames too ("Mrs Sarah Justice"); after a
+        # title they are offices, which _titled_name_end handles.
+        roles = {word.lower() for word in self.LEGAL_PRESERVE} - {"judge", "justice"}
+        self._name_endings = _NAME_ENDING_WORDS | roles | {f"{word}s" for word in roles}
         self._counters: dict[EntityType, int] = {}
         self._lookup: dict[tuple[EntityType, str], str] = {}
         self._mapping: dict[str, str] = {}
@@ -597,15 +668,93 @@ class Anonymiser:
         """
         Find titled person names ("Mr Smith", "Dr Jane Doe", "MR ADAM CARTER").
 
-        Role words end a name ("Mr Adam Carter\nClaimant"), and a title
-        followed by one ("Mr Justice Fraser") is not a name at all.
+        A name ends at a role or label ("Mr Adam Carter\nClaimant"), a
+        function word, or the title of the next name. A title followed by
+        an office ("Mr Justice Fraser", "Lord Chancellor") is not a name.
         """
-        return [
-            match.span()
-            for pattern in self._name_patterns
-            for match in pattern.finditer(text)
-            if not _JUDICIAL_OFFICE_AFTER.match(text, match.end())
-        ]
+        spans: list[tuple[int, int]] = []
+        for title in _TITLE.finditer(text):
+            if spans and title.start() < spans[-1][1]:
+                continue  # inside the previous name ("Professor Sir John Smith")
+            end = self._titled_name_end(text, title)
+            if end is not None:
+                spans.append((title.start(), end))
+        return spans
+
+    def _titled_name_end(self, text: str, title: re.Match) -> int | None:
+        """Where the name after a title ends, or None if no name follows it."""
+        caps = title.group().rstrip(".").isupper()
+        # A name in capitals, or after "Dear Sir" or "My Lord", stays on its line.
+        salutation = _SALUTATION.search(text, max(0, title.start() - 12), title.start())
+        tokens = _name_tokens(text, title.end(), may_wrap=not caps and salutation is None)
+
+        index = 0
+        while index < len(tokens) and self._ends_name(tokens, index, caps):
+            index += 1  # further titles: "Professor Sir John Smith"
+        last_title = tokens[index - 1].word if index else title.group()
+        name: list[_NameToken] = []
+        words = 0
+        for position in range(index, len(tokens)):
+            kind = self._name_part(tokens, position, caps, bool(name))
+            if kind is None or (kind == "word" and words == 4):
+                break
+            words += kind == "word"
+            name.append(tokens[position])
+
+        name = _trim_name(name)
+        if any(token.wrapped for token in name) and not _WRAPPED_NAME_FOLLOWER.match(
+            text, name[-1].end
+        ):
+            # Not running text after the next line's words: keep the first line.
+            name = _trim_name([token for token in name if not token.wrapped])
+        if not name:
+            return None
+        first = name[0].word.lower()
+        if first in _OFFICES or (last_title.lower() in ("lord", "lady") and first in _LORD_OFFICES):
+            return None
+        return name[-1].end
+
+    def _ends_name(self, tokens: list[_NameToken], index: int, caps: bool) -> bool:
+        """True if tokens[index] is a title that starts another name."""
+        token = tokens[index]
+        if not _is_title(token.word):
+            return False
+        if token.dotted and token.word.lower() in _ABBREVIATION_WORDS:
+            return True  # "Mrs Jones Mr. Smith", but not "Mr Peter Lord."
+        return index + 1 < len(tokens) and (
+            self._name_part(tokens, index + 1, caps, False) is not None
+        )
+
+    def _name_part(
+        self, tokens: list[_NameToken], index: int, caps: bool, continues: bool
+    ) -> str | None:
+        """
+        Classify tokens[index] as part of a name: "initial", "particle" or
+        "word", or None if the name has ended.
+
+        Args:
+            continues: The token follows another part of the same name.
+        """
+        token = tokens[index]
+        word = token.word
+        lower = word.lower()
+        if token.wrapped and lower in _LINE_START_WORDS:
+            return None
+        if len(word) == 1:
+            if not word.isupper() or (continues and word == "V"):
+                return None  # "MR ADAM CARTER V DELTA"
+            return "initial"
+        if lower in _FUNCTION_WORDS or lower in self._name_endings:
+            return None
+        if continues and lower in _POST_NOMINALS and not word.istitle():
+            return None
+        if continues and self._ends_name(tokens, index, caps):
+            return None  # "MR JOHN SMITH MRS JANE DOE"
+        if lower in _NAME_PARTICLES and word.islower():
+            return "particle"  # "Mr van der Berg"; must precede a word
+        if caps:
+            return "word" if word.isupper() else None
+        return "word" if _is_capitalised(word) else None
 
     def _find_organisations(self, text: str) -> list[tuple[int, int]]:
         """Find company names ending in a legal form ("Acme Trading Ltd")."""
@@ -616,13 +765,19 @@ class Anonymiser:
             first = 0
             # "Mr Brown and Acme Ltd", "Mr Smith of Acme Ltd": a person comes
             # first, and the organisation starts after the linking word.
-            titles = [i for i, w in enumerate(words) if w.rstrip(".") in self.TITLES]
+            titles = [i for i, w in enumerate(words) if _is_title(w.rstrip("."))]
             if titles:
                 links = [
-                    i for i, w in enumerate(words) if i > titles[-1] and w in ("and", "of", "&")
+                    i
+                    for i, w in enumerate(words)
+                    if i > titles[-1] and w.lower() in ("and", "of", "&")
                 ]
                 if links:
                     first = links[0] + 1
+            # "MR ADAM CARTER V DELTA FREIGHT LIMITED": the company follows "v".
+            versus = [i for i, w in enumerate(words) if w.lower().rstrip(".") in ("v", "vs")]
+            if versus:
+                first = max(first, versus[-1] + 1)
             # Drop sentence starters ("Yesterday Acme Ltd").
             while first < len(words) - 1 and words[first].lower() in _ORG_LEADING_WORDS:
                 first += 1
@@ -656,6 +811,14 @@ class Anonymiser:
             self._lookup[key] = replacement
             self._mapping.setdefault(original, replacement)
         return replacement
+
+
+def _trim_name(name: list[_NameToken]) -> list[_NameToken]:
+    """Drop trailing initials and particles: "Mr A", "My Lady I am", "Mr Smith de facto"."""
+    name = list(name)
+    while name and (len(name[-1].word) == 1 or name[-1].word.islower()):
+        name.pop()
+    return name
 
 
 def _as_entity_type(value: EntityType | str) -> EntityType:

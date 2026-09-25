@@ -160,7 +160,7 @@ def estimate_memory_usage(
         model_memory_gb = (params * 2) / (1024**3)
         training_overhead_gb = 4.0
     else:  # full
-        # 16-bit weights and gradients plus 32-bit Adam states: ~16 bytes per param
+        # Mixed precision: 32-bit weights, gradients and Adam states, ~16 bytes per param
         model_memory_gb = (params * 16) / (1024**3)
         training_overhead_gb = 0.0
 

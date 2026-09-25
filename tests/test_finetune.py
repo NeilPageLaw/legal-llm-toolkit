@@ -194,6 +194,13 @@ class TestSavedConfigReuse:
         assert (config.max_seq_length, config.optim, config.num_epochs) == (512, "adafactor", 10)
         assert config.use_4bit is True  # untouched derived value, same method
 
+    def test_configs_saved_without_derived_from_are_derived_again(self):
+        saved = LegalTrainingConfig(method="lora").to_dict()
+        del saved["derived_from"]  # the format before inputs were recorded
+        reloaded = LegalTrainingConfig.from_dict({**saved, "method": "qlora"})
+        assert reloaded.use_4bit is True
+        assert reloaded.explicit_settings(saved).keys().isdisjoint(saved["derived_settings"])
+
     def test_explicit_values_survive_reuse(self):
         saved = LegalTrainingConfig(num_epochs=7, optim="adamw_torch").to_dict()
         reloaded = LegalTrainingConfig.from_dict({**saved, "task": "contract_review"})
@@ -207,8 +214,9 @@ def test_model_dtype_follows_mixed_precision():
     def dtype(**settings):
         return LegalTrainer(LegalTrainingConfig(**settings))._torch_dtype(torch)
 
-    # fp16 full fine-tuning needs float32 weights for the gradient scaler.
+    # Full fine-tuning keeps float32 master weights under bf16 or fp16 mixed precision.
     assert dtype(method="full", fp16=True, bf16=False) is torch.float32
-    assert dtype(method="full") is torch.bfloat16
+    assert dtype(method="full") is torch.float32
+    assert dtype(method="lora") is torch.bfloat16
     assert dtype(method="lora", fp16=True, bf16=False) is torch.float16
     assert dtype(method="lora", bf16=False) is torch.float32
