@@ -45,3 +45,22 @@ def test_sample_instructions_load():
     dataset = load_legal_corpus(SAMPLE_DATA / "instructions.jsonl")
     assert len(dataset) == 4
     assert all(sample.is_instruction for sample in dataset)
+
+
+def test_readme_examples_produce_the_documented_output(capsys):
+    from legalkit.preprocess import Anonymiser, CitationParser
+
+    readme = (Path(__file__).parent.parent / "README.md").read_text()
+
+    parser = CitationParser(jurisdiction="uk")
+    text = "As held in Smith v Jones [2024] UKSC 15 at [42], applying section 1 of the Companies Act 2006"
+    for citation in parser.parse(text):
+        print(citation.normalised, citation.parties, citation.paragraph)
+    for line in capsys.readouterr().out.splitlines():
+        assert f"# {line}" in readme
+
+    result = Anonymiser().anonymise(
+        "Mr John Smith of 12 High Street, London SW1A 1AA relied on "
+        "Caparo Industries plc v Dickman [1990] 2 AC 605."
+    )
+    assert f"# {result.text}" in readme
