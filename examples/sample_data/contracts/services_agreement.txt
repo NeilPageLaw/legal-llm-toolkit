@@ -1,0 +1,58 @@
+FICTIONAL EXAMPLE: all parties and personal details are invented.
+
+SERVICES AGREEMENT
+
+This Agreement is made between Acme Consulting Ltd of 12 High Street, London SW1A 1AA
+(the "Supplier") and Beta Retail plc (the "Customer").
+
+1. DEFINITIONS
+
+1.1 "Charges" means the fees payable by the Customer under clause 4.
+
+1.2 "Services" means the consultancy services described in the Schedule.
+
+2. TERM
+
+2.1 This Agreement shall commence on the Effective Date and continue for a period of
+12 months, unless terminated earlier in accordance with clause 7.
+
+3. SUPPLIER'S OBLIGATIONS
+
+3.1 The Supplier shall provide the Services with reasonable skill and care.
+
+3.2 The Supplier's contact for this Agreement is Ms Jane Doe
+(jane.doe@example.com, 020 7946 0123).
+
+4. CHARGES AND PAYMENT
+
+4.1 The Customer shall pay the Charges of £120,000 per year, invoiced quarterly.
+
+4.2 The Customer shall pay each invoice within 30 days of receipt to account number
+12345678, sort code 12-34-56.
+
+5. LIMITATION OF LIABILITY
+
+5.1 Nothing in this Agreement limits liability for death or personal injury caused by
+negligence, as section 2(1) of the Unfair Contract Terms Act 1977 provides.
+
+5.2 Subject to clause 5.1, the Supplier's total liability shall not exceed 150% of the
+Charges paid in the 12 months preceding the claim.
+
+6. DATA PROTECTION
+
+6.1 Each party shall comply with the UK GDPR and the Data Protection Act 2018. Where
+the Supplier processes personal data on the Customer's behalf, the terms required by
+Article 28(3) UK GDPR apply.
+
+7. TERMINATION
+
+7.1 Either party may terminate this Agreement by giving not less than 30 days' written
+notice to the other party.
+
+7.2 Either party may terminate this Agreement with immediate effect if the other party
+commits a material breach which is not remedied within 14 days of written notice.
+
+8. GOVERNING LAW
+
+8.1 This Agreement and any dispute arising out of or in connection with it shall be
+governed by the law of England and Wales.

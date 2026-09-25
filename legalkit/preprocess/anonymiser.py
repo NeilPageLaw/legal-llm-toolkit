@@ -5,15 +5,18 @@ Handles names, addresses, dates, financial information, and other
 personally identifiable information while preserving legal structure.
 """
 
-import re
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Set, Tuple
-from enum import Enum
 import hashlib
+import re
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from enum import Enum
+
+from legalkit.preprocess.citations import CitationParser
 
 
 class EntityType(Enum):
     """Types of entities to anonymise."""
+
     PERSON = "person"
     ORGANISATION = "organisation"
     ADDRESS = "address"
@@ -29,6 +32,7 @@ class EntityType(Enum):
 @dataclass
 class AnonymisedEntity:
     """Represents an anonymised entity."""
+
     original: str
     replacement: str
     entity_type: EntityType
@@ -40,11 +44,12 @@ class AnonymisedEntity:
 @dataclass
 class AnonymisationResult:
     """Result of anonymisation process."""
+
     text: str
-    entities: List[AnonymisedEntity] = field(default_factory=list)
-    mapping: Dict[str, str] = field(default_factory=dict)
-    
-    def get_original(self, replacement: str) -> Optional[str]:
+    entities: list[AnonymisedEntity] = field(default_factory=list)
+    mapping: dict[str, str] = field(default_factory=dict)
+
+    def get_original(self, replacement: str) -> str | None:
         """Get original value from replacement."""
         for orig, repl in self.mapping.items():
             if repl == replacement:
@@ -52,303 +57,958 @@ class AnonymisationResult:
         return None
 
 
+# A detector finds entities the rules cannot, e.g. untitled names. It returns
+# (start, end, label) spans, where label is an EntityType value or an NER
+# label such as "PERSON" or "ORG".
+Detector = Callable[[str], Iterable[tuple[int, int, str]]]
+
+NER_LABELS = {
+    "PERSON": EntityType.PERSON,
+    "PER": EntityType.PERSON,
+    "ORG": EntityType.ORGANISATION,
+    "ORGANIZATION": EntityType.ORGANISATION,
+    "ORGANISATION": EntityType.ORGANISATION,
+    "EMAIL_ADDRESS": EntityType.EMAIL,
+    "PHONE_NUMBER": EntityType.PHONE,
+    "IBAN_CODE": EntityType.ACCOUNT_NUMBER,
+    "CREDIT_CARD": EntityType.ACCOUNT_NUMBER,
+    "UK_NHS": EntityType.NATIONAL_ID,
+    "US_SSN": EntityType.NATIONAL_ID,
+}
+
+
+def _iban_is_valid(value: str) -> bool:
+    """Check an IBAN's mod-97 check digits."""
+    compact = re.sub(r"\s", "", value)
+    if not compact.isalnum():
+        return False
+    rearranged = compact[4:] + compact[:4]
+    digits = "".join(str(int(char, 36)) for char in rearranged)
+    return int(digits) % 97 == 1
+
+
+def _luhn_is_valid(value: str) -> bool:
+    """Check a payment card number with the Luhn algorithm."""
+    digits = [int(d) for d in re.sub(r"\D", "", value)]
+    if not 13 <= len(digits) <= 19:
+        return False
+    total = 0
+    for index, digit in enumerate(reversed(digits)):
+        if index % 2 == 1:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        total += digit
+    return total % 10 == 0
+
+
+@dataclass(frozen=True)
+class _Rule:
+    """A detection rule. A pattern group named "value" narrows the entity span."""
+
+    entity_type: EntityType
+    pattern: re.Pattern
+    validator: Callable[[str], bool] | None = None
+
+
+_MONTH = (
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?"
+    r"|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+)
+# "the 2019 High Court judgment" names a court, not an address.
+_COURT_TYPES = (
+    r"(?:High|Crown|County|Supreme|Magistrates['’]?|Family|Divisional|Commercial|Admiralty|"
+    r"Chancery|Coroners?['’]?|Youth|Circuit|District|Appeals?|Tax|Employment|Upper|Business|"
+    r"Property|Patents)"
+)
+_STREET_TYPES = (
+    r"(?:Street|St|Road|Rd|Avenue|Ave|Lane|Ln|Drive|Dr|Court|Ct|Place|Pl|Square|Sq|"
+    r"Gardens|Gdns|Crescent|Cres|Way|Close|Terrace|Grove|Hill|Park|Row|Mews|Walk|"
+    r"Parade|Rise|View|Green|Boulevard|Blvd|Wharf|Quay|Yard|Circus)"
+)
+
+# Rules in priority order: when two matches cover the same text, the earlier
+# rule wins (a sort code beats a date that looks the same).
+RULES = (
+    _Rule(
+        EntityType.EMAIL,
+        re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+    ),
+    _Rule(
+        EntityType.NATIONAL_ID,
+        # UK National Insurance number
+        re.compile(
+            r"\b(?!BG|GB|NK|KN|TN|NT|ZZ)[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]"
+            r"\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]\b"
+        ),
+    ),
+    _Rule(EntityType.NATIONAL_ID, re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),  # US SSN
+    _Rule(
+        EntityType.NATIONAL_ID,
+        re.compile(r"(?i:\bNHS\s*(?:no\.?|number)?\s*:?\s*)(?P<value>\d{3}\s?\d{3}\s?\d{4})\b"),
+    ),
+    _Rule(EntityType.ACCOUNT_NUMBER, re.compile(r"\b\d{2}-\d{2}-\d{2}\b")),  # UK sort code
+    _Rule(
+        EntityType.ACCOUNT_NUMBER,
+        re.compile(r"(?i:\baccount\s*(?:no\.?|number)?\s*:?\s*)(?P<value>\d{8})\b"),
+    ),
+    _Rule(
+        EntityType.ACCOUNT_NUMBER,
+        re.compile(r"\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){2,7}(?:\s?[A-Z0-9]{1,3})?\b"),
+        validator=_iban_is_valid,
+    ),
+    _Rule(
+        EntityType.ACCOUNT_NUMBER,
+        re.compile(r"\b(?:\d{4}[ -]?){3}\d{1,7}\b"),
+        validator=_luhn_is_valid,
+    ),
+    _Rule(
+        EntityType.CASE_NUMBER,
+        # Court claim numbers: HC-2014-000123, CO/1234/2020, C1/2020/1234
+        re.compile(r"\b(?:[A-Z]{2}-\d{4}-\d{6}|[A-Z]{1,3}\d?/\d{4}/\d{2,5})\b"),
+    ),
+    _Rule(
+        EntityType.PHONE,
+        # UK: 020 7123 4567, 07123 456789, +44 (0)20 7123 4567
+        re.compile(r"(?<![\d+])(?:\+44\s?(?:\(0\)\s?)?|0)(?:\d[\s-]?){8,9}\d(?!\d)"),
+    ),
+    _Rule(
+        EntityType.PHONE,
+        # North American: (555) 123-4567, 555.123.4567, +1 555 123 4567
+        re.compile(r"(?<![\d-])(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?![\d-])"),
+    ),
+    _Rule(
+        EntityType.ADDRESS,
+        re.compile(
+            # "the 2019 High Court judgment", "5 Crown Court judges" and "3 High
+            # Court (Chancery Division) judges" name a court; "3 County Court
+            # Road", "1 Crown Court, London" and "1 Crown Court\nLondon" are
+            # addresses. After a year, a court name is always a court.
+            r"\b(?:(?P<year>(?:18|19|20)\d\d)\b|(?!(?:18|19|20)\d\d\b)\d{1,4}[A-Za-z]?),?[^\S\n]+"
+            rf"(?!{_COURT_TYPES}\s+(?:Courts?|Tribunals?)\b(?![ \t]+{_STREET_TYPES}\b)"
+            r"(?(year)|(?=[^\S\n]+[A-Za-z]|[^\S\n]*\([A-Z]|[^\S\n]*\n\s*[a-z])))"
+            rf"(?:[A-Z][a-z'’\-]+\s+){{1,3}}{_STREET_TYPES}\b"
+            # Keep an abbreviation's full stop only mid-sentence ("12 High St. and").
+            r"(?:\.(?=\s+[a-z,;]))?"
+        ),
+    ),
+    _Rule(
+        EntityType.ADDRESS,
+        # UK postcode
+        re.compile(r"\b[A-PR-UWYZ][A-HK-Y]?\d[A-HJKPS-UW\d]?\s?\d[ABD-HJLNP-UW-Z]{2}\b"),
+    ),
+    _Rule(
+        EntityType.DATE,
+        re.compile(
+            rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH}\.?,?\s+\d{{4}}\b"
+            rf"|\b{_MONTH}\.?\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s+\d{{4}}\b"
+            r"|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"
+            r"|\b\d{4}-\d{2}-\d{2}\b",
+            re.IGNORECASE,
+        ),
+    ),
+    _Rule(
+        EntityType.MONEY,
+        re.compile(
+            r"(?:[£$€]|\b(?:GBP|USD|EUR)\s?)\d[\d,]*(?:\.\d{1,2})?"
+            r"(?:\s?(?:million|billion|thousand|bn|m|k)\b)?"
+            r"|\b\d[\d,]*(?:\.\d{1,2})?(?:\s(?:million|billion|thousand))?"
+            r"\s?(?:pounds?|dollars?|euros?|GBP|USD|EUR)\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+# Capital letters, including accented ones ("É", "Ł").
+_CAPITAL = "A-Z" + "".join(c for c in map(chr, range(0xC0, 0x250)) if c.isupper())
+# Space within a line, including no-break spaces ("Mr\u00a0Smith") and the
+# "\r" of a Windows line break.
+_SPACE = r"[^\S\n]"
+_ORG_SUFFIX = (
+    r"(?:Limited|LIMITED|Ltd|LTD|PLC|plc|Inc|INC|LLC|LLP|L\.L\.P|Corporation|CORPORATION|"
+    r"Corp|CORP|Company|COMPANY|Co|CO|GmbH|AG|SA|S\.A|NV|N\.V|BV|B\.V|SE|LP|L\.P)"
+)
+# A name ends at its first legal form: "Acme Ltd and Beta Ltd" is two companies.
+_ORG_SUFFIX_WORD = rf"{_ORG_SUFFIX}(?![\w\-])"  # not "Co-operative"
+_ORG_TOKEN = rf"(?!{_ORG_SUFFIX_WORD})(?:[{_CAPITAL}][\w&'’\-]*|&)"
+# A legal form may wrap onto the next line ("Acme Trading\nLimited and") if
+# running text or punctuation follows it: a line that starts "Company means",
+# "Company Secretary" or "Limited Warranty" is not the end of a company name.
+_WRAPPED_ORG_SUFFIX = (
+    rf"(?!(?:Company|COMPANY|Co|CO)(?![\w\-])){_ORG_SUFFIX_WORD}(?:{_SPACE}+{_ORG_SUFFIX_WORD})?"
+    rf"(?={_SPACE}*(?:\n|\Z|[,.;:)(\"“”'‘’])|{_SPACE}+[a-z])"
+)
+# Legal forms that are also words or codes ("Corporation means", "AG" for the
+# Attorney General, "SE" in addresses): at the start of a line they end a
+# company name only after two words of it, or before another legal form.
+_AMBIGUOUS_ORG_SUFFIXES = frozenset("corporation corp ag sa se nv bv lp".split())
+_ORG_SUFFIX_WORDS = frozenset(
+    "limited ltd plc inc llc llp corporation corp company co gmbh ag sa nv bv se lp".split()
+)
+_ORG = re.compile(
+    rf"\b{_ORG_TOKEN}(?:{_SPACE}+(?:{_ORG_TOKEN}|and|of|the|for|de|du)){{0,6}}"
+    rf"(?:{_SPACE}+{_ORG_SUFFIX_WORD}(?:{_SPACE}+{_ORG_SUFFIX_WORD})?"
+    rf"|{_SPACE}*\n{_SPACE}*{_WRAPPED_ORG_SUFFIX})"
+    # Keep an abbreviation's full stop only mid-sentence ("Acme Ltd. and").
+    r"(?:\.(?=\s+[a-z,;]))?"
+)
+
+# Words that start a sentence or clause, or describe a role, rather than
+# forming part of an organisation's name.
+_ORG_LEADING_WORDS = frozenset(
+    """
+    a after also although an and as at because before between but by dear during
+    for from further furthermore however if in it its meanwhile moreover of on our
+    re since so that the their then there these this those to under when where
+    whereas which while with yesterday today your
+    """.split()
+)
+_JOB_TITLE_WORDS = frozenset(
+    """
+    board chair chairman chairwoman chief company director directors employee employees
+    executive finance general head managing manager member members officer partner
+    president secretary shareholder shareholders
+    """.split()
+)
+# Organisation-like names that are public bodies, not private parties.
+_PUBLIC_BODY_WORDS = (
+    "court",
+    "tribunal",
+    "parliament",
+    "house of lords",
+    "privy council",
+    "commission",
+    "government",
+    "ministry",
+    "department",
+    "crown",
+    "secretary of state",
+)
+
+# Honorifics that introduce a name, in title case or capitals ("Mr", "MR").
+# Abbreviations may take a full stop ("Mr."); words may not, so "Yes, my
+# Lord. The claimant..." holds no name.
+_ABBREVIATED_TITLES = ("Mr", "Mrs", "Ms", "Mx", "Dr", "Prof", "Rev", "Revd")
+_WORD_TITLES = ("Miss", "Professor", "Sir", "Dame", "Lord", "Lady")
+_TITLES = _ABBREVIATED_TITLES + _WORD_TITLES
+_UNDOTTED_TITLES = frozenset(title.lower() for title in _WORD_TITLES)
+# Titles also recognised in lower case ("mr Smith"); "ms", "dr" and "rev" are
+# also milliseconds, debit and revision.
+_LOWERCASE_TITLES = frozenset({"mr", "mrs"})
+
+
+def _alternation(words: Iterable[str]) -> str:
+    return "|".join(re.escape(word) for word in sorted(words, key=len, reverse=True))
+
+
+def _title_pattern(titles: Iterable[str]) -> re.Pattern:
+    """
+    Match a title in title case or capitals ("Mr", "MR"). Titles other than
+    words such as "Lord" may take a full stop ("Mr."), so "Yes, my Lord. The
+    claimant" holds no name.
+    """
+    dotted: set[str] = set()
+    undotted: set[str] = set()
+    for title in titles:
+        forms = {title, title.upper()}
+        if title.lower() in _LOWERCASE_TITLES:
+            forms.add(title.lower())
+        (undotted if title.lower() in _UNDOTTED_TITLES else dotted).update(forms)
+    alternatives = []
+    if dotted:
+        alternatives.append(rf"(?:{_alternation(dotted)})\.?")
+    if undotted:
+        alternatives.append(_alternation(undotted))
+    if not alternatives:
+        return re.compile(r"(?!)")  # no titles: match nothing
+    return re.compile(rf"(?<!\w)(?:{'|'.join(alternatives)})(?![\w'’\-])")
+
+
+# "Dear Sir" and "My Lord" end their line: the next line is not a name.
+_SALUTATION = re.compile(rf"(?i:\b(?:dear|my)){_SPACE}+\Z")
+# A form label before a title ("Name: Mr", "Present:\tMr John Smith"): the next
+# line holds another field, not the rest of the name.
+_LABEL_BEFORE_TITLE = re.compile(
+    rf"(?:^|\n){_SPACE}*(?:[-*•]|\d+[.)])?{_SPACE}*[A-Z][\w'’\-]*"
+    rf"(?:{_SPACE}+[\w'’\-]+){{0,2}}{_SPACE}*:{_SPACE}*\Z"
+)
+
+# A word of a name: letters with inner apostrophes or hyphens ("O'Brien",
+# "Smith-Jones", "José"), without a possessive "'s".
+_NAME_WORD = re.compile(r"[^\W\d_]+(?:['’\-](?!s\b)[^\W\d_]+)*")
+_NAME_GAP = re.compile(rf"{_SPACE}*\n{_SPACE}*|{_SPACE}+")
+_NEXT_CHARACTER = re.compile(rf"{_SPACE}*(\S|\n|\Z)")
+# An elision or article before the capital: "d'Souza", "al-Hassan".
+_NAME_PREFIX = re.compile(r"^(?:[a-z]{1,2}['’]|(?:al|el)-)")
+
+# Words that end a name: labels ("Witness Statement", "Date:"), job titles
+# ("Partner") and legal forms. Legal roles ("Claimant", "Solicitor") are
+# added from Anonymiser.LEGAL_PRESERVE. Ordinary words that are also names
+# ("Page", "Said", "Lord", "Judge") are deliberately not listed.
+_NAME_ENDING_WORDS = frozenset(
+    """
+    date dated signed signature address tel telephone email fax mobile statement exhibit
+    schedule clause section part paragraph partner director associate secretary manager
+    chairman chair officer consultant clerk trustee trustees executor executors
+    administrator administrators receiver liquidator limited ltd plc llp llc inc company
+    co corporation madam
+    """.split()
+)
+# Post-nominals end a name when not in title case ("Mr John Smith KC", "Lord
+# Denning MR"), so the surnames Ma and Sc are still names.
+_POST_NOMINALS = frozenset(
+    """
+    qc kc sc cbe obe mbe kbe dbe gbe mp mep msp jp frcs frcp mrcs mrcp phd dphil llb llm bcl
+    mr lj ljj jj cj vc psc dpsc jsc
+    """.split()
+)
+# Function words are never part of a name ("MR SMITH AND MRS JONES", "Mr Smith
+# In Person").
+_FUNCTION_WORDS = frozenset(
+    """
+    the this that these those and nor but if of at as by for from with into upon is was
+    are were has had it its we they them their our his me us v vs re via in
+    """.split()
+)
+# Function words that are also names ("Mr Per Svensson", "Ms Or Cohen", "Mr
+# Minh To"); see Anonymiser._name_like_word_ends_name.
+_NAME_LIKE_FUNCTION_WORDS = frozenset("per to on or my".split())
+# Words that open a line of a letter or list rather than continue a name
+# wrapped onto it ("Mr John Smith\nThank you", "Mr Smith\nHe replied").
+_LINE_START_WORDS = frozenset(
+    """
+    dear yours thank thanks please regarding subject further following yes no note
+    instructed head he she you an
+    """.split()
+)
+# Offices, not names: "Mr Justice Fraser", "Mr Speaker", "Lord Chief Justice",
+# "Lord Chancellor", and the quarter day "Lady Day".
+_OFFICES = frozenset({"justice", "justices", "speaker", "president"})
+_LORD_OFFICES = frozenset(
+    """
+    chief chancellor advocate president ordinary mayor lieutenant speaker privy high
+    provost chamberlain steward commissioner commissioners warden great bishop day
+    """.split()
+)
+_NAME_PARTICLES = frozenset(
+    "van von de da di du del della der den la le al el bin ibn ap ter ten dos das".split()
+)
+# What may follow a name wrapped onto a new line: running text, not a label
+# ("Apologies:"), a heading or a company ("Mr John Smith\nAcme Holdings plc").
+_WRAPPED_NAME_FOLLOWER = re.compile(
+    rf"{_SPACE}*(?:\Z|\()|[,.;!?)\]'’\"”]|{_SPACE}+[—–-]{_SPACE}"
+    rf"|{_SPACE}+(?!{_ORG_SUFFIX_WORD})[a-z]"
+    rf"|{_SPACE}+(?i:{'|'.join(sorted(_POST_NOMINALS))})\b"
+)
+
+
+@dataclass(frozen=True)
+class _NameToken:
+    word: str
+    start: int
+    end: int  # after an initial's full stop
+    wrapped: bool  # on a line after the title
+    dotted: bool  # followed by a full stop ("J.", "Mr.")
+    after: str  # the next character that is not a space: "\n" at a line end, "" at the end
+
+
+def _name_tokens(text: str, position: int, may_wrap: bool, limit: int = 8) -> list[_NameToken]:
+    """The words after a title, up to a gap that cannot fall inside a name."""
+    tokens: list[_NameToken] = []
+    wrapped = False
+    while len(tokens) < limit:
+        gap = _NAME_GAP.match(text, position)
+        if gap is not None:
+            if "\n" in gap.group():
+                if wrapped or not may_wrap:
+                    break
+                wrapped = True
+            position = gap.end()
+        elif not (tokens and text[tokens[-1].end - 1] == "."):
+            break  # words need a space between them, except initials ("J.R. Smith")
+        match = _NAME_WORD.match(text, position)
+        if match is None:
+            break
+        end = match.end()
+        dotted = text.startswith(".", end)
+        if dotted and len(match.group()) == 1:
+            end += 1
+        after = _NEXT_CHARACTER.match(text, end)
+        tokens.append(
+            _NameToken(
+                match.group(), match.start(), end, wrapped, dotted, after.group(1) if after else ""
+            )
+        )
+        position = end
+    return tokens
+
+
+def _is_capitalised(word: str) -> bool:
+    """True for "Smith", "SMITH", "McDonald", "José", "d'Souza" and "al-Hassan"."""
+    return _NAME_PREFIX.sub("", word)[:1].isupper()
+
+
 class Anonymiser:
     """
     Anonymises PII in legal documents while preserving legal structure.
-    
+
     Features:
-    - Consistent replacement (same name → same placeholder throughout)
-    - Preserves legal citations and case names
-    - Handles UK/EU data protection requirements
-    - Reversible with mapping file
-    
+    - Consistent replacement (same entity -> same placeholder throughout)
+    - Placeholders numbered in reading order: [PERSON_1], [PERSON_2], ...
+    - Legal citations are never altered; case names in citations are kept
+      when ``preserve_case_names`` is set
+    - Structured identifiers: emails, phone numbers, UK postcodes, NI and
+      NHS numbers, sort codes, IBANs (checksum validated), payment cards
+      (Luhn validated), court claim numbers
+    - Reversible with the returned mapping
+
+    Limitations:
+        Rule-based detection finds titled names ("Mr Smith", "Dr Jane Doe")
+        and companies with a legal-form suffix ("Acme Ltd"). Untitled names
+        ("Jane Smith"), and names in scripts without capital letters, need a
+        named-entity model: pass ``ner="en_core_web_sm"`` (requires spaCy) or
+        your own detector. No automated tool guarantees anonymisation; review
+        output before relying on it.
+
+        Case names inside citations are public record, but if a document
+        concerns one of the cited cases the preserved names can identify its
+        parties. Set ``preserve_case_names=False`` for such documents.
+
     Example:
         >>> anon = Anonymiser()
-        >>> result = anon.anonymise("John Smith of 123 High Street signed the contract")
+        >>> result = anon.anonymise("Mr John Smith of 12 High Street signed the contract")
         >>> print(result.text)
-        '[PERSON_1] of [ADDRESS_1] signed the contract'
+        [PERSON_1] of [ADDRESS_1] signed the contract
         >>> print(result.mapping)
-        {'John Smith': '[PERSON_1]', '123 High Street': '[ADDRESS_1]'}
+        {'Mr John Smith': '[PERSON_1]', '12 High Street': '[ADDRESS_1]'}
     """
-    
-    # Patterns for different entity types
-    PATTERNS = {
-        EntityType.EMAIL: re.compile(
-            r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-        ),
-        EntityType.PHONE: re.compile(
-            r'(?:\+44\s?|0)(?:\d\s?){9,10}|'
-            r'(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
-        ),
-        EntityType.MONEY: re.compile(
-            r'[£$€]\s*[\d,]+(?:\.\d{2})?(?:\s*(?:million|billion|m|bn|k))?|'
-            r'[\d,]+(?:\.\d{2})?\s*(?:pounds?|dollars?|euros?|GBP|USD|EUR)',
-            re.IGNORECASE
-        ),
-        EntityType.DATE: re.compile(
-            r'\b\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June|'
-            r'July|August|September|October|November|December)\s+\d{4}\b|'
-            r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b',
-            re.IGNORECASE
-        ),
-        EntityType.NATIONAL_ID: re.compile(
-            r'\b[A-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-Z]\b|'  # UK NI number
-            r'\b\d{3}-\d{2}-\d{4}\b'  # US SSN
-        ),
-        EntityType.ACCOUNT_NUMBER: re.compile(
-            r'\b\d{8}\b(?=.*sort)|'  # UK account
-            r'\b\d{2}-\d{2}-\d{2}\b'  # UK sort code
-        ),
-        EntityType.ADDRESS: re.compile(
-            r'\d+\s+[A-Z][a-zA-Z\s]+(?:Street|Road|Avenue|Lane|Drive|Court|'
-            r'Place|Square|Gardens|Crescent|Way|Close|Terrace)\b',
-            re.IGNORECASE
-        ),
-    }
-    
-    # Common UK/US titles and suffixes for name detection
-    TITLES = {'Mr', 'Mrs', 'Ms', 'Miss', 'Dr', 'Prof', 'Sir', 'Dame', 'Lord', 'Lady'}
-    
-    # Legal terms to preserve (not anonymise)
+
+    RULES = RULES
+    TITLES = set(_TITLES)
+
+    # Words that mark a titled name as a legal role rather than a person
+    # to anonymise ("Mr Justice Smith").
     LEGAL_PRESERVE = {
-        'claimant', 'defendant', 'appellant', 'respondent', 'applicant',
-        'plaintiff', 'petitioner', 'court', 'tribunal', 'judge', 'justice',
-        'barrister', 'solicitor', 'counsel', 'witness', 'expert'
+        "claimant",
+        "defendant",
+        "appellant",
+        "respondent",
+        "applicant",
+        "plaintiff",
+        "petitioner",
+        "court",
+        "tribunal",
+        "judge",
+        "justice",
+        "barrister",
+        "solicitor",
+        "counsel",
+        "witness",
+        "expert",
     }
-    
+
     def __init__(
         self,
         preserve_case_names: bool = True,
         preserve_dates: bool = False,
         consistent_replacement: bool = True,
-        salt: Optional[str] = None
+        salt: str | None = None,
+        entity_types: Iterable[EntityType | str] | None = None,
+        ner: str | Detector | None = None,
     ):
         """
         Initialise the anonymiser.
-        
+
         Args:
-            preserve_case_names: Keep case citation names (Smith v Jones)
-            preserve_dates: Don't anonymise dates (useful for legal timelines)
-            consistent_replacement: Same entity gets same placeholder
-            salt: Salt for deterministic hashing (for reproducibility)
+            preserve_case_names: Keep party names inside case citations
+                ("Smith v Jones [2024] UKSC 1").
+            preserve_dates: Don't anonymise dates (useful for legal timelines).
+            consistent_replacement: Same entity gets same placeholder.
+            salt: Secret for deterministic placeholders such as
+                [PERSON_3f9a1c2e]. The same entity then gets the same
+                placeholder in every document and every run, without storing
+                a mapping. This is pseudonymisation, not anonymisation: anyone
+                with the salt can test guesses. Keep it secret.
+            entity_types: Entity types to anonymise (EntityType members or
+                their values, e.g. "person"). Defaults to all.
+            ner: Optional named-entity detector for names the rules miss:
+                a spaCy model name such as "en_core_web_sm", or a callable
+                returning (start, end, label) spans.
         """
         self.preserve_case_names = preserve_case_names
         self.preserve_dates = preserve_dates
         self.consistent_replacement = consistent_replacement
-        self.salt = salt or ""
-        
-        self._counters: Dict[EntityType, int] = {}
-        self._mapping: Dict[str, str] = {}
-        self._case_names: Set[str] = set()
-        
+        self.salt = salt
+
+        if entity_types is None:
+            selected = set(EntityType)
+        else:
+            selected = {_as_entity_type(t) for t in entity_types}
+        if preserve_dates:
+            selected.discard(EntityType.DATE)
+        self.entity_types: frozenset[EntityType] = frozenset(selected)
+
+        self._detector: Detector | None = _spacy_detector(ner) if isinstance(ner, str) else ner
+        self._citation_parser = CitationParser()
+        # "Judge" and "Justice" are surnames too ("Mrs Sarah Justice"); after a
+        # title they are offices, which _titled_name_end handles.
+        roles = {word.lower() for word in self.LEGAL_PRESERVE} - {"judge", "justice"}
+        self._name_endings = _NAME_ENDING_WORDS | roles | {f"{word}s" for word in roles}
+        self._parties = self._name_endings | _ORG_SUFFIX_WORDS
+        self._title_words = frozenset(title.lower() for title in self.TITLES)
+        self._title_pattern = _title_pattern(self.TITLES)
+        self._counters: dict[EntityType, int] = {}
+        self._lookup: dict[tuple[EntityType, str], str] = {}
+        self._mapping: dict[str, str] = {}
+
     def reset(self):
         """Reset counters and mappings for new document."""
-        self._counters = {t: 0 for t in EntityType}
+        self._counters = {}
+        self._lookup = {}
         self._mapping = {}
-        self._case_names = set()
-        
+
     def anonymise(self, text: str, reset: bool = True) -> AnonymisationResult:
         """
         Anonymise PII in text.
-        
+
         Args:
             text: Text to anonymise
-            reset: Reset counters for new document
-            
+            reset: Reset counters for new document. Pass False to continue
+                numbering, and reuse placeholders, from the previous call.
+
         Returns:
-            AnonymisationResult with anonymised text and mapping
+            AnonymisationResult with anonymised text, the entities found
+            (offsets into the input text) and the original -> placeholder mapping
         """
         if reset:
             self.reset()
-            
-        entities: List[AnonymisedEntity] = []
-        
-        # Extract case names first if preserving
-        if self.preserve_case_names:
-            self._extract_case_names(text)
-        
-        # Find all entities
-        for entity_type, pattern in self.PATTERNS.items():
-            if entity_type == EntityType.DATE and self.preserve_dates:
+
+        protected = self._protected_spans(text)
+        candidates = self._find_candidates(text)
+
+        # Keep non-overlapping candidates: earliest first, then longest, then
+        # by rule priority. Anything touching a citation or preserved case
+        # name is dropped.
+        candidates.sort(key=lambda c: (c[0], -(c[1] - c[0]), c[3]))
+        accepted: list[tuple[int, int, EntityType, float]] = []
+        last_end = -1
+        for start, end, entity_type, _, confidence in candidates:
+            if start < last_end or any(
+                start < p_end and p_start < end for p_start, p_end in protected
+            ):
                 continue
-                
-            for match in pattern.finditer(text):
-                original = match.group(0)
-                
-                # Skip if it's a case name we're preserving
-                if self._is_case_name(original):
-                    continue
-                    
-                replacement = self._get_replacement(original, entity_type)
-                
-                entities.append(AnonymisedEntity(
+            accepted.append((start, end, entity_type, confidence))
+            last_end = end
+
+        entities = []
+        for start, end, entity_type, confidence in accepted:
+            original = text[start:end]
+            entities.append(
+                AnonymisedEntity(
                     original=original,
-                    replacement=replacement,
+                    replacement=self._get_replacement(original, entity_type),
                     entity_type=entity_type,
-                    start=match.start(),
-                    end=match.end()
-                ))
-        
-        # Find person names (more complex pattern)
-        entities.extend(self._find_person_names(text))
-        
-        # Find organisation names
-        entities.extend(self._find_organisations(text))
-        
-        # Sort by position (reverse) for replacement
-        entities.sort(key=lambda e: e.start, reverse=True)
-        
-        # Apply replacements
-        result_text = text
-        for entity in entities:
-            result_text = (
-                result_text[:entity.start] + 
-                entity.replacement + 
-                result_text[entity.end:]
+                    start=start,
+                    end=end,
+                    confidence=confidence,
+                )
             )
-        
+
+        parts = []
+        position = 0
+        for entity in entities:
+            parts.append(text[position : entity.start])
+            parts.append(entity.replacement)
+            position = entity.end
+        parts.append(text[position:])
+
         return AnonymisationResult(
-            text=result_text,
-            entities=sorted(entities, key=lambda e: e.start),
-            mapping=dict(self._mapping)
+            text="".join(parts), entities=entities, mapping=dict(self._mapping)
         )
-    
-    def _get_replacement(self, original: str, entity_type: EntityType) -> str:
-        """Get or create replacement for entity."""
-        # Normalise for consistent mapping
-        key = original.strip().lower()
-        
-        if self.consistent_replacement and key in self._mapping:
-            return self._mapping[key]
-        
-        self._counters[entity_type] = self._counters.get(entity_type, 0) + 1
-        counter = self._counters[entity_type]
-        
-        replacement = f"[{entity_type.value.upper()}_{counter}]"
-        
-        if self.consistent_replacement:
-            self._mapping[key] = replacement
-            self._mapping[original] = replacement
-            
-        return replacement
-    
-    def _extract_case_names(self, text: str):
-        """Extract case names to preserve."""
-        # Pattern: Name v Name (typically in citations)
-        case_pattern = re.compile(
-            r'([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)\s+v\.?\s+'
-            r'([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)'
-            r'(?=\s*[\[\(])'  # Followed by citation
-        )
-        
-        for match in case_pattern.finditer(text):
-            self._case_names.add(match.group(1).lower())
-            self._case_names.add(match.group(2).lower())
-    
-    def _is_case_name(self, text: str) -> bool:
-        """Check if text is a case name we're preserving."""
-        return text.strip().lower() in self._case_names
-    
-    def _find_person_names(self, text: str) -> List[AnonymisedEntity]:
-        """Find person names in text."""
-        entities = []
-        
-        # Pattern: Title + Name or Capitalised Name sequences
-        # Mr John Smith, Dr Jane Doe, John William Smith
-        name_pattern = re.compile(
-            r'\b(?:' + '|'.join(self.TITLES) + r')\.?\s+'
-            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b'
-        )
-        
-        for match in name_pattern.finditer(text):
-            full_match = match.group(0)
-            
-            # Skip legal terms
-            if any(term in full_match.lower() for term in self.LEGAL_PRESERVE):
-                continue
-                
-            # Skip case names
-            if self._is_case_name(match.group(1)):
-                continue
-            
-            replacement = self._get_replacement(full_match, EntityType.PERSON)
-            
-            entities.append(AnonymisedEntity(
-                original=full_match,
-                replacement=replacement,
-                entity_type=EntityType.PERSON,
-                start=match.start(),
-                end=match.end(),
-                confidence=0.9
-            ))
-        
-        return entities
-    
-    def _find_organisations(self, text: str) -> List[AnonymisedEntity]:
-        """Find organisation names in text."""
-        entities = []
-        
-        # Pattern: Name + Ltd/Limited/PLC/Inc etc
-        org_pattern = re.compile(
-            r'\b([A-Z][a-zA-Z\s&\-]+?)\s*'
-            r'(?:Limited|Ltd|PLC|Inc|LLC|LLP|Corporation|Corp)\b\.?',
-            re.IGNORECASE
-        )
-        
-        for match in org_pattern.finditer(text):
-            full_match = match.group(0)
-            
-            replacement = self._get_replacement(full_match, EntityType.ORGANISATION)
-            
-            entities.append(AnonymisedEntity(
-                original=full_match,
-                replacement=replacement,
-                entity_type=EntityType.ORGANISATION,
-                start=match.start(),
-                end=match.end(),
-                confidence=0.95
-            ))
-        
-        return entities
-    
-    def deanonymise(self, text: str, mapping: Dict[str, str]) -> str:
+
+    def deanonymise(self, text: str, mapping: dict[str, str]) -> str:
         """
         Reverse anonymisation using mapping.
-        
+
         Args:
             text: Anonymised text
             mapping: Original -> Replacement mapping
-            
+
         Returns:
             Original text with PII restored
         """
-        result = text
-        
-        # Create reverse mapping
-        reverse = {v: k for k, v in mapping.items() if k == k.strip()}
-        
-        for replacement, original in reverse.items():
-            result = result.replace(replacement, original)
-            
-        return result
-    
-    def create_training_pair(
-        self, 
-        text: str
-    ) -> Tuple[AnonymisationResult, Dict[str, str]]:
+        reverse: dict[str, str] = {}
+        for original, replacement in mapping.items():
+            reverse.setdefault(replacement, original)
+        if not reverse:
+            return text
+        pattern = re.compile("|".join(re.escape(r) for r in sorted(reverse, key=len, reverse=True)))
+        return pattern.sub(lambda m: reverse[m.group(0)], text)
+
+    def create_training_pair(self, text: str) -> tuple[AnonymisationResult, dict[str, str]]:
         """
         Create anonymised training pair with reversible mapping.
-        
+
         Useful for creating training data where you need both
         anonymised and original versions.
-        
+
         Args:
             text: Original text
-            
+
         Returns:
             Tuple of (AnonymisationResult, reverse_mapping)
         """
         result = self.anonymise(text)
-        reverse_mapping = {v: k for k, v in result.mapping.items()}
-        
+        reverse_mapping: dict[str, str] = {}
+        for original, replacement in result.mapping.items():
+            reverse_mapping.setdefault(replacement, original)
         return result, reverse_mapping
+
+    # ------------------------------------------------------------------
+    # Detection
+    # ------------------------------------------------------------------
+
+    def _protected_spans(self, text: str) -> list[tuple[int, int]]:
+        """Spans that must not be altered: citations and, optionally, case names."""
+        citations = self._citation_parser.parse(text, unique=False)
+        spans = [(c.start, c.end) for c in citations if c.start is not None and c.end is not None]
+        if self.preserve_case_names:
+            names = self._citation_parser.find_case_names(text, citations)
+            spans.extend((start, end) for _, start, end in names)
+        return spans
+
+    def _find_candidates(self, text: str) -> list[tuple[int, int, EntityType, int, float]]:
+        """Return (start, end, type, priority, confidence) for every possible entity."""
+        candidates = []
+        for priority, rule in enumerate(self.RULES):
+            if rule.entity_type not in self.entity_types:
+                continue
+            for match in rule.pattern.finditer(text):
+                group = "value" if "value" in rule.pattern.groupindex else 0
+                start, end = match.span(group)
+                if rule.validator is not None and not rule.validator(match.group(group)):
+                    continue
+                candidates.append((start, end, rule.entity_type, priority, 1.0))
+
+        low_priority = len(self.RULES)
+        if EntityType.PERSON in self.entity_types:
+            for start, end in self._find_person_names(text):
+                candidates.append((start, end, EntityType.PERSON, low_priority, 0.9))
+        if EntityType.ORGANISATION in self.entity_types:
+            for start, end in self._find_organisations(text):
+                candidates.append((start, end, EntityType.ORGANISATION, low_priority + 1, 0.9))
+        if self._detector is not None:
+            for start, end, label in self._detector(text):
+                entity_type = _entity_type_for_label(label)
+                if entity_type is None or entity_type not in self.entity_types:
+                    continue
+                if entity_type is EntityType.ORGANISATION and _is_public_body(text[start:end]):
+                    continue
+                candidates.append((start, end, entity_type, low_priority + 2, 0.8))
+        return candidates
+
+    def _find_person_names(self, text: str) -> list[tuple[int, int]]:
+        """
+        Find titled person names ("Mr Smith", "Dr Jane Doe", "MR ADAM CARTER").
+
+        A name ends at a role or label ("Mr Adam Carter\nClaimant"), a
+        function word, or the title of the next name. A title followed by
+        an office ("Mr Justice Fraser", "Lord Chancellor") is not a name.
+        """
+        spans: list[tuple[int, int]] = []
+        for title in self._title_pattern.finditer(text):
+            if spans and title.start() < spans[-1][1]:
+                continue  # inside the previous name ("Professor Sir John Smith")
+            end = self._titled_name_end(text, title)
+            if end is not None:
+                spans.append((title.start(), end))
+        return spans
+
+    def _titled_name_end(self, text: str, title: re.Match) -> int | None:
+        """Where the name after a title ends, or None if no name follows it."""
+        form = title.group().rstrip(".")
+        # After "MR" the name is in capitals ("MR ADAM CARTER").
+        caps = form.isupper()
+        # A name stays on the title's line in capitals, after lower-case "mr",
+        # after "Dear Sir" or "My Lord", and after a form label ("Name: Mr").
+        may_wrap = (
+            not caps
+            and not form.islower()
+            and not _SALUTATION.search(text, max(0, title.start() - 12), title.start())
+            and not _LABEL_BEFORE_TITLE.search(text, max(0, title.start() - 60), title.start())
+        )
+        tokens = _name_tokens(text, title.end(), may_wrap)
+
+        index = 0
+        while index < len(tokens) and self._ends_name(tokens, index, caps):
+            index += 1  # further titles: "Professor Sir John Smith"
+        last_title = tokens[index - 1].word if index else form
+        name: list[_NameToken] = []
+        for position in range(index, len(tokens)):
+            kind = self._name_part(tokens, position, caps, name)
+            if kind is None or (kind == "word" and _full_words(name) == 4):
+                break
+            name.append(tokens[position])
+
+        name = _trim_name(name)
+        first_line = [token for token in name if not token.wrapped]
+        if (
+            first_line
+            and len(first_line) < len(name)
+            and not _WRAPPED_NAME_FOLLOWER.match(text, name[-1].end)
+        ):
+            # Words wrapped onto the next line continue the name only before
+            # running text ("Mr John\nSmith said", not "Mr John Smith\nApologies:").
+            name = _trim_name(first_line)
+        if not name:
+            return None
+        first = name[0].word.lower()
+        if first in _OFFICES or (last_title.lower() in ("lord", "lady") and first in _LORD_OFFICES):
+            return None
+        return name[-1].end
+
+    def _ends_name(self, tokens: list[_NameToken], index: int, caps: bool) -> bool:
+        """True if tokens[index] is a title that starts another name."""
+        token = tokens[index]
+        if not self._is_title(token.word):
+            return False
+        if token.dotted and token.word.lower() not in _UNDOTTED_TITLES:
+            return True  # "Mrs Jones Mr. Smith", but not "Mr Peter Lord."
+        if index + 1 == len(tokens):
+            return False
+        following = tokens[index + 1].word
+        if following.lower() in _POST_NOMINALS and not following.istitle():
+            return False  # "Mr Peter Lord QC"
+        return self._name_part(tokens, index + 1, caps, []) is not None
+
+    def _is_title(self, word: str) -> bool:
+        return word.lower() in self._title_words and (word.istitle() or word.isupper())
+
+    def _name_part(
+        self, tokens: list[_NameToken], index: int, caps: bool, name: list[_NameToken]
+    ) -> str | None:
+        """
+        Classify tokens[index] as part of a name: "initial", "particle" or
+        "word", or None if the name has ended.
+
+        Args:
+            name: The parts of the name before this token.
+        """
+        token = tokens[index]
+        word = token.word
+        lower = word.lower()
+        # "Mr John Smith\nHe replied": the first word of the next line, after
+        # a name on the title's line, may start a sentence.
+        if token.wrapped and name and not name[-1].wrapped and lower in _LINE_START_WORDS:
+            return None
+        if len(word) == 1:
+            if not word.isupper() or (
+                name and word == "V" and self._is_versus(tokens, index, name)
+            ):
+                return None
+            return "initial"
+        if lower in _FUNCTION_WORDS or lower in self._name_endings:
+            return None
+        if lower in _NAME_LIKE_FUNCTION_WORDS and self._name_like_word_ends_name(
+            tokens, index, name
+        ):
+            return None
+        if name and lower in _POST_NOMINALS and not word.istitle():
+            return None
+        if name and self._ends_name(tokens, index, caps):
+            return None  # "MR JOHN SMITH MRS JANE DOE"
+        if lower in _NAME_PARTICLES and word.islower():
+            return "particle"  # "Mr van der Berg"; must precede a word
+        if caps:
+            return "word" if word.isupper() else None
+        return "word" if _is_capitalised(word) else None
+
+    def _is_versus(self, tokens: list[_NameToken], index: int, name: list[_NameToken]) -> bool:
+        """
+        True if a "V" after part of a name separates two parties ("MR ADAM
+        CARTER V DELTA LIMITED", "MR SMITH V MRS JONES") rather than being an
+        initial ("Mr John V. Smith").
+        """
+        if _full_words(name) >= 2:
+            return True
+        return any(
+            self._is_title(token.word) or token.word.lower() in _ORG_SUFFIX_WORDS
+            for token in tokens[index + 1 : index + 5]
+        )
+
+    def _name_like_word_ends_name(
+        self, tokens: list[_NameToken], index: int, name: list[_NameToken]
+    ) -> bool:
+        """
+        Whether "Per", "To", "On", "Or" or "My" ends a name rather than being
+        part of it ("Mr Per Svensson", "Ms Or Cohen", "Mr Minh To").
+        """
+        token = tokens[index]
+        following = tokens[index + 1] if index + 1 < len(tokens) else None
+        starts_next_line = token.wrapped and bool(name) and not name[-1].wrapped
+        if starts_next_line or token.after == ":" or token.after.isdigit():
+            return True  # "Mr Smith\nTo", "Mr Smith To: Mrs Jones", "Mr Smith On 5 May"
+        if following is None:
+            return False
+        if not name:
+            # "Sir Or Madam" is not a name; "Ms Or Cohen", "Mr Per Lord" and
+            # "Mr To has" are.
+            return _is_capitalised(following.word) and following.word.lower() in self._name_endings
+        if self._is_title(following.word):
+            return True  # "Mr Smith Or Mrs Jones", "Mr Smith To\nMrs Jones"
+        if following.wrapped:
+            return False
+        # "Mr Smith On Behalf Of", but "Ms Nguyen Thi My Linh", "Mr Kenneth To SC"
+        # and "MR MINH TO V ACME".
+        return (
+            token.word.lower() != "my"
+            and _is_capitalised(following.word)
+            and following.word.upper() not in ("V", "VS")
+            and not (following.word.lower() in _POST_NOMINALS and not following.word.istitle())
+        )
+
+    def _find_organisations(self, text: str) -> list[tuple[int, int]]:
+        """Find company names ending in a legal form ("Acme Trading Ltd")."""
+        spans = []
+        for match in _ORG.finditer(text):
+            tokens = list(re.finditer(r"\S+", match.group(0)))
+            words = [t.group(0) for t in tokens]
+            first = 0
+            # "Mr Brown and Acme Ltd", "Mr Smith of Acme Ltd": a person comes
+            # first, and the organisation starts after the linking word.
+            # A title followed by a linking word is part of the name ("LORD AND
+            # TAYLOR LLC").
+            titles = [
+                i
+                for i, w in enumerate(words[:-1])
+                if self._is_title(w.rstrip(".")) and words[i + 1].lower() not in ("and", "of", "&")
+            ]
+            if titles:
+                links = [
+                    i
+                    for i, w in enumerate(words)
+                    if i > titles[-1] and w.lower() in ("and", "of", "&")
+                ]
+                if links:
+                    first = links[0] + 1
+            # The company follows "v" when a party comes before it ("MR ADAM
+            # CARTER V DELTA LIMITED", "Claimant V DELTA LIMITED", "ACME LIMITED V
+            # DELTA LIMITED"); "Henry V Ltd" and "Class V Holdings Ltd" are names.
+            for i in range(first, len(words) - 1):
+                if words[i].lower().rstrip(".") not in ("v", "vs"):
+                    continue
+                if i == first:
+                    party_before = self._party_before(text, match.start() + tokens[i].start())
+                else:
+                    party_before = any(
+                        self._is_title(w.rstrip(".")) or w.lower().rstrip(".,") in self._parties
+                        for w in words[first:i]
+                    )
+                if party_before:
+                    first = i + 1
+            # Drop sentence starters ("Yesterday Acme Ltd").
+            while first < len(words) - 1 and words[first].lower() in _ORG_LEADING_WORDS:
+                first += 1
+            # Drop a role before "of" ("Managing Director of Acme Ltd").
+            if "of" in words[first:]:
+                of_index = words.index("of", first)
+                if all(w.lower() in _JOB_TITLE_WORDS for w in words[first:of_index]):
+                    first = of_index + 1
+            if first >= len(words) - 1:
+                continue
+            # An ambiguous legal form at the start of a line ("Definitions\n
+            # Corporation means", "Attorney General\nAG's") ends a company name
+            # only after two words of it, or before another legal form.
+            line_break = match.group(0).rfind("\n")
+            if line_break != -1:
+                wrapped = match.group(0)[line_break + 1 :].split()
+                before = [t for t in tokens[first:] if t.start() < line_break]
+                if (
+                    wrapped[0].rstrip(".").lower() in _AMBIGUOUS_ORG_SUFFIXES
+                    and len(wrapped) == 1
+                    and (len(before) < 2 or text.startswith(("'", "’"), match.end()))
+                ):
+                    continue
+            start = match.start() + tokens[first].start()
+            if _is_public_body(text[start : match.end()]):
+                continue
+            spans.append((start, match.end()))
+        return spans
+
+    def _party_before(self, text: str, position: int) -> bool:
+        """True if the word before position ends a party: "ACME LIMITED", "Claimant"."""
+        previous = re.search(r"([\w.]+)[^\w\n]*\Z", text[max(0, position - 40) : position])
+        return previous is not None and previous.group(1).lower().rstrip(".") in self._parties
+
+    def _get_replacement(self, original: str, entity_type: EntityType) -> str:
+        """Get or create replacement for entity."""
+        key = (entity_type, re.sub(r"\s+", " ", original).strip().lower())
+
+        if self.consistent_replacement and key in self._lookup:
+            replacement = self._lookup[key]
+        elif self.salt is not None:
+            digest = hashlib.sha256(f"{self.salt}|{key[0].value}|{key[1]}".encode()).hexdigest()
+            replacement = f"[{entity_type.name}_{digest[:8]}]"
+        else:
+            self._counters[entity_type] = self._counters.get(entity_type, 0) + 1
+            replacement = f"[{entity_type.name}_{self._counters[entity_type]}]"
+
+        if self.consistent_replacement or self.salt is not None:
+            self._lookup[key] = replacement
+            self._mapping.setdefault(original, replacement)
+        return replacement
+
+
+def _full_words(name: list[_NameToken]) -> int:
+    """Words of a name other than initials and particles."""
+    return sum(len(token.word) > 1 and not token.word.islower() for token in name)
+
+
+def _trim_name(name: list[_NameToken]) -> list[_NameToken]:
+    """Drop trailing initials and particles: "Mr A", "My Lady I am", "Mr Smith de facto"."""
+    name = list(name)
+    while name and (len(name[-1].word) == 1 or name[-1].word.islower()):
+        name.pop()
+    return name
+
+
+def _as_entity_type(value: EntityType | str) -> EntityType:
+    """Accept an EntityType, its value ("person") or its name ("PERSON")."""
+    if isinstance(value, EntityType):
+        return value
+    try:
+        return EntityType(value.lower())
+    except ValueError:
+        valid = ", ".join(t.value for t in EntityType)
+        raise ValueError(f"Unknown entity type: {value!r}. Valid types: {valid}") from None
+
+
+def _entity_type_for_label(label: str) -> EntityType | None:
+    if label.upper() in NER_LABELS:
+        return NER_LABELS[label.upper()]
+    try:
+        return EntityType(label.lower())
+    except ValueError:
+        return None
+
+
+def _is_public_body(name: str) -> bool:
+    lowered = name.lower()
+    return any(word in lowered for word in _PUBLIC_BODY_WORDS)
+
+
+def _spacy_detector(model_name: str) -> Detector:
+    """Build a detector from a spaCy pipeline."""
+    try:
+        import spacy
+    except ImportError as e:
+        raise ImportError(
+            "NER-based anonymisation needs spaCy: pip install 'legal-llm-toolkit[ner]' "
+            f"and python -m spacy download {model_name}"
+        ) from e
+    nlp = spacy.load(model_name)
+
+    def detect(text: str) -> list[tuple[int, int, str]]:
+        return [(ent.start_char, ent.end_char, ent.label_) for ent in nlp(text).ents]
+
+    return detect

@@ -6,19 +6,34 @@ creating appropriately sized chunks for LLM training.
 """
 
 import re
-from typing import List, Optional, Tuple
 from dataclasses import dataclass
+
+# Rough characters-per-token ratio for English text.
+CHARS_PER_TOKEN = 4
+
+# A full stop followed by whitespace and the start of a new sentence.
+_SENTENCE_END = re.compile(r"[.!?][\"'”’)\]]*\s+(?=[A-Z0-9(\[\"“‘])")
+
+# Tokens ending in a full stop that do not end a sentence.
+_ABBREVIATIONS = frozenset(
+    """
+    v vs mr mrs ms dr prof no nos s ss para paras art arts reg regs sch ch pt cl
+    e.g i.e etc ltd co inc corp plc st cf viz al op cit ibid id ed eds vol p pp n nn
+    fn j lj cj jj rt hon esq sec secs subs
+    """.split()
+)
 
 
 @dataclass
 class Chunk:
     """A chunk of legal text with metadata."""
+
     text: str
     start_char: int
     end_char: int
-    section: Optional[str] = None
-    paragraph: Optional[str] = None
-    
+    section: str | None = None
+    paragraph: str | None = None
+
     @property
     def length(self) -> int:
         return len(self.text)
@@ -27,305 +42,344 @@ class Chunk:
 class LegalChunker:
     """
     Intelligent chunker for legal documents.
-    
+
     Unlike generic text chunkers, this preserves legal structure:
     - Keeps clauses together when possible
     - Respects section boundaries
     - Handles numbered paragraphs correctly
     - Maintains context across chunk boundaries
-    
+
+    Documents are split into sections, then paragraphs, then sentences,
+    only as far as needed, and the pieces are packed into chunks of up to
+    ``chunk_size`` tokens, overlap included. A remainder smaller than
+    ``min_chunk_size`` is merged into its neighbour, which can take that
+    chunk up to ``chunk_size + min_chunk_size`` tokens. Every chunk is an
+    exact slice of the input: ``text[chunk.start_char:chunk.end_char] == chunk.text``.
+
     Example:
         >>> chunker = LegalChunker(chunk_size=512, overlap=50)
-        >>> chunks = chunker.chunk(contract_text)
+        >>> chunks = chunker.chunk_with_metadata(contract_text)
         >>> for chunk in chunks:
         ...     print(f"Section: {chunk.section}, Length: {chunk.length}")
     """
-    
+
     # Patterns for legal structure
     SECTION_PATTERNS = {
         "uk": re.compile(
-            r'^(?:'
-            r'(?:SECTION|PART|CHAPTER|SCHEDULE)\s+\d+|'
-            r'\d+\.\s+[A-Z]|'
-            r'(?:DEFINITIONS?|INTERPRETATION|COMMENCEMENT|GENERAL)\s*$'
-            r')',
-            re.MULTILINE | re.IGNORECASE
+            r"^[ \t]*(?:"
+            r"(?:SECTION|PART|CHAPTER|SCHEDULE)\s+\d+[A-Z]?\b|"
+            r"\d+\.\s+[A-Z]|"
+            r"(?:DEFINITIONS?|INTERPRETATION|COMMENCEMENT|GENERAL)[ \t]*$"
+            r")",
+            re.MULTILINE | re.IGNORECASE,
         ),
         "us": re.compile(
-            r'^(?:'
-            r'(?:ARTICLE|SECTION|§)\s+\d+|'
-            r'\d+\.\d+\s+[A-Z]|'
-            r'(?:DEFINITIONS?|RECITALS|WHEREAS)\s*$'
-            r')',
-            re.MULTILINE | re.IGNORECASE
+            r"^[ \t]*(?:"
+            r"(?:ARTICLE|SECTION)\s+[IVXLC\d]+\b|§\s*\d+|"
+            r"\d+\.\d+\s+[A-Z]|"
+            r"(?:DEFINITIONS?|RECITALS|WHEREAS)\b"
+            r")",
+            re.MULTILINE | re.IGNORECASE,
+        ),
+        "eu": re.compile(
+            r"^[ \t]*(?:"
+            r"(?:CHAPTER|TITLE|SECTION|PART)\s+[IVXLC\d]+\b|"
+            r"Article\s+\d+[a-z]?\b"
+            r")",
+            re.MULTILINE | re.IGNORECASE,
         ),
     }
-    
+
+    # Paragraph and clause markers at the start of a line:
+    # 1.1, 1.1.1, 12., (a), (aa), (iv), (2), a), 3)
     PARAGRAPH_PATTERN = re.compile(
-        r'^(?:'
-        r'\d+\.\d+(?:\.\d+)?|'  # 1.1 or 1.1.1
-        r'\([a-z]\)|'           # (a)
-        r'\([ivx]+\)|'          # (i), (ii), (iii)
-        r'[a-z]\)|'             # a)
-        r'\d+\)'                # 1)
-        r')\s+',
-        re.MULTILINE
+        r"^[ \t]*(?:"
+        r"\d+(?:\.\d+)+\.?|"
+        r"\d+\.|"
+        r"\((?:[a-z]{1,2}|[ivxlc]+|\d+)\)|"
+        r"[a-z]\)|"
+        r"\d+\)"
+        r")(?=\s)",
+        re.MULTILINE,
     )
-    
+
     def __init__(
         self,
         chunk_size: int = 512,
-        overlap: int = 50,
+        overlap: int | None = None,
         jurisdiction: str = "uk",
         respect_sections: bool = True,
         respect_paragraphs: bool = True,
-        min_chunk_size: int = 100
+        min_chunk_size: int | None = None,
     ):
         """
         Initialise the chunker.
-        
+
         Args:
-            chunk_size: Target chunk size in tokens (approximate)
-            overlap: Number of tokens to overlap between chunks
-            jurisdiction: Jurisdiction for structure detection
+            chunk_size: Target chunk size in tokens (estimated at
+                ~4 characters per token)
+            overlap: Tokens repeated from the end of the previous chunk.
+                Defaults to 10% of chunk_size, at most 50.
+            jurisdiction: Jurisdiction for structure detection ('uk', 'us', 'eu')
             respect_sections: Try to keep sections together
             respect_paragraphs: Try to keep paragraphs together
-            min_chunk_size: Minimum chunk size (won't split below this)
+            min_chunk_size: Chunks smaller than this many tokens are merged
+                into a neighbour. Defaults to 20% of chunk_size, at most 100.
+
+        Raises:
+            ValueError: If the sizes are inconsistent.
         """
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be at least 1")
+        if overlap is None:
+            overlap = min(50, chunk_size // 10)
+        if not 0 <= overlap < chunk_size:
+            raise ValueError(f"overlap must be between 0 and chunk_size - 1, got {overlap}")
+        if min_chunk_size is None:
+            min_chunk_size = min(100, chunk_size // 5)
+        if not 0 <= min_chunk_size < chunk_size:
+            raise ValueError(
+                f"min_chunk_size must be between 0 and chunk_size - 1, got {min_chunk_size}"
+            )
+
         self.chunk_size = chunk_size
         self.overlap = overlap
         self.jurisdiction = jurisdiction.lower()
         self.respect_sections = respect_sections
         self.respect_paragraphs = respect_paragraphs
         self.min_chunk_size = min_chunk_size
-        
+
         self.section_pattern = self.SECTION_PATTERNS.get(
-            jurisdiction, 
-            self.SECTION_PATTERNS["uk"]
+            self.jurisdiction, self.SECTION_PATTERNS["uk"]
         )
-        
-    def chunk(self, text: str) -> List[str]:
+
+    def chunk(self, text: str) -> list[str]:
         """
         Chunk text into training-ready pieces.
-        
+
         Args:
             text: Legal document text
-            
+
         Returns:
             List of text chunks
         """
-        # First, identify structure
-        sections = self._split_sections(text) if self.respect_sections else [text]
-        
-        chunks = []
-        for section in sections:
-            section_chunks = self._chunk_section(section)
-            chunks.extend(section_chunks)
-            
-        return chunks
-    
-    def chunk_with_metadata(self, text: str) -> List[Chunk]:
+        return [c.text for c in self.chunk_with_metadata(text)]
+
+    def chunk_with_metadata(self, text: str) -> list[Chunk]:
         """
         Chunk text and return Chunk objects with metadata.
-        
+
         Args:
             text: Legal document text
-            
+
         Returns:
-            List of Chunk objects
+            List of Chunk objects with exact character offsets, the heading
+            of the section each chunk starts in, and its first paragraph marker.
         """
+        if not text.strip():
+            return []
+
+        # Leave room for the overlap so that every chunk, overlap included,
+        # stays within chunk_size.
+        limit = (self.chunk_size - self.overlap) * CHARS_PER_TOKEN
+        spans = self._merge_small(self._pack(self._units(text, limit), limit), limit)
+
         chunks = []
-        current_pos = 0
-        
-        sections = self._identify_sections(text)
-        
-        for section_name, section_text, section_start in sections:
-            section_chunks = self._chunk_section(section_text)
-            
-            for chunk_text in section_chunks:
-                # Find actual position in original text
-                chunk_start = text.find(chunk_text, current_pos)
-                if chunk_start == -1:
-                    chunk_start = current_pos
-                    
-                chunks.append(Chunk(
-                    text=chunk_text,
-                    start_char=chunk_start,
-                    end_char=chunk_start + len(chunk_text),
-                    section=section_name
-                ))
-                
-                current_pos = chunk_start + len(chunk_text) - self.overlap
-                
+        for index, (own_start, end, section) in enumerate(spans):
+            start = own_start
+            if index > 0 and self.overlap:
+                start = self._overlap_start(text, own_start, spans[index - 1][0])
+            start, end = _strip(text, start, end)
+            if start >= end:
+                continue
+            chunks.append(
+                Chunk(
+                    text=text[start:end],
+                    start_char=start,
+                    end_char=end,
+                    section=section,
+                    paragraph=self._first_marker(text, own_start, end),
+                )
+            )
         return chunks
-    
-    def _split_sections(self, text: str) -> List[str]:
-        """Split text into major sections."""
-        matches = list(self.section_pattern.finditer(text))
-        
-        if not matches:
-            return [text]
-            
-        sections = []
-        for i, match in enumerate(matches):
-            start = match.start()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            sections.append(text[start:end])
-            
-        # Add any text before first section
-        if matches[0].start() > 0:
-            sections.insert(0, text[:matches[0].start()])
-            
-        return sections
-    
-    def _identify_sections(self, text: str) -> List[Tuple[Optional[str], str, int]]:
-        """Identify sections with their names and positions."""
-        matches = list(self.section_pattern.finditer(text))
-        
-        if not matches:
-            return [(None, text, 0)]
-            
-        sections = []
-        
-        # Text before first section
-        if matches[0].start() > 0:
-            sections.append((None, text[:matches[0].start()], 0))
-        
-        for i, match in enumerate(matches):
-            start = match.start()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            section_name = match.group(0).strip()
-            sections.append((section_name, text[start:end], start))
-            
-        return sections
-    
-    def _chunk_section(self, text: str) -> List[str]:
-        """Chunk a single section."""
-        # Rough token estimate (chars / 4)
-        char_limit = self.chunk_size * 4
-        overlap_chars = self.overlap * 4
-        
-        if len(text) <= char_limit:
-            return [text.strip()] if text.strip() else []
-        
-        chunks = []
-        
-        if self.respect_paragraphs:
-            # Split by paragraphs first
-            paragraphs = self._split_paragraphs(text)
-            current_chunk = ""
-            
-            for para in paragraphs:
-                if len(current_chunk) + len(para) <= char_limit:
-                    current_chunk += para
-                else:
-                    if current_chunk.strip():
-                        chunks.append(current_chunk.strip())
-                    
-                    # If paragraph itself is too long, split it
-                    if len(para) > char_limit:
-                        para_chunks = self._split_long_text(para, char_limit, overlap_chars)
-                        chunks.extend(para_chunks[:-1])
-                        current_chunk = para_chunks[-1] if para_chunks else ""
-                    else:
-                        # Add overlap from previous chunk
-                        if chunks:
-                            overlap_text = chunks[-1][-overlap_chars:]
-                            current_chunk = overlap_text + para
-                        else:
-                            current_chunk = para
-            
-            if current_chunk.strip():
-                chunks.append(current_chunk.strip())
-        else:
-            chunks = self._split_long_text(text, char_limit, overlap_chars)
-            
-        return chunks
-    
-    def _split_paragraphs(self, text: str) -> List[str]:
-        """Split text into paragraphs, preserving paragraph markers."""
-        # Split on double newlines or paragraph numbers
-        parts = re.split(r'(\n\n+)', text)
-        
-        paragraphs = []
-        current = ""
-        
-        for part in parts:
-            if re.match(r'\n\n+', part):
-                if current:
-                    paragraphs.append(current)
-                    current = ""
-            else:
-                # Check for paragraph markers within the text
-                sub_parts = self.PARAGRAPH_PATTERN.split(part)
-                if len(sub_parts) > 1:
-                    for i, sub in enumerate(sub_parts):
-                        if sub.strip():
-                            if i > 0:
-                                # This is after a paragraph marker
-                                if current:
-                                    paragraphs.append(current)
-                                current = sub
-                            else:
-                                current += sub
-                else:
-                    current += part
-                    
-        if current:
-            paragraphs.append(current)
-            
-        return paragraphs
-    
-    def _split_long_text(
-        self, 
-        text: str, 
-        char_limit: int, 
-        overlap_chars: int
-    ) -> List[str]:
-        """Split long text at sentence boundaries."""
-        # Try to split at sentence boundaries
-        sentence_pattern = re.compile(r'(?<=[.!?])\s+')
-        sentences = sentence_pattern.split(text)
-        
-        chunks = []
-        current_chunk = ""
-        
-        for sentence in sentences:
-            if len(current_chunk) + len(sentence) <= char_limit:
-                current_chunk += sentence + " "
-            else:
-                if current_chunk.strip():
-                    chunks.append(current_chunk.strip())
-                
-                # Start new chunk with overlap
-                if chunks and overlap_chars > 0:
-                    overlap = chunks[-1][-overlap_chars:]
-                    current_chunk = overlap + sentence + " "
-                else:
-                    current_chunk = sentence + " "
-                    
-                # If single sentence is too long, force split
-                while len(current_chunk) > char_limit:
-                    chunks.append(current_chunk[:char_limit].strip())
-                    current_chunk = current_chunk[char_limit - overlap_chars:]
-        
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
-            
-        return chunks
-    
+
     def estimate_tokens(self, text: str) -> int:
         """
         Estimate token count for text.
-        
+
         This is a rough estimate. For accurate counts,
         use the actual tokenizer of your target model.
-        
+
         Args:
             text: Text to estimate
-            
+
         Returns:
             Estimated token count
         """
-        # Rough estimate: ~4 chars per token for English
-        return len(text) // 4
+        return len(text) // CHARS_PER_TOKEN
+
+    # ------------------------------------------------------------------
+    # Splitting
+    # ------------------------------------------------------------------
+
+    def _units(self, text: str, limit: int) -> list[tuple[int, int, str | None]]:
+        """Split text into contiguous pieces no longer than limit, coarsest first."""
+        if self.respect_sections:
+            sections = self._section_spans(text)
+        else:
+            sections = [(None, 0, len(text))]
+
+        units = []
+        for name, start, end in sections:
+            if end - start <= limit:
+                units.append((start, end, name))
+                continue
+            if self.respect_paragraphs:
+                paragraphs = self._paragraph_spans(text, start, end)
+            else:
+                paragraphs = [(start, end)]
+            for p_start, p_end in paragraphs:
+                if p_end - p_start <= limit:
+                    units.append((p_start, p_end, name))
+                else:
+                    units.extend(
+                        (s, e, name) for s, e in self._sentence_spans(text, p_start, p_end, limit)
+                    )
+        return units
+
+    def _section_spans(self, text: str) -> list[tuple[str | None, int, int]]:
+        """Sections as (heading, start, end), covering the whole text."""
+        starts = [m.start() for m in self.section_pattern.finditer(text)]
+        if not starts or starts[0] > 0:
+            starts.insert(0, 0)
+        spans = []
+        for i, start in enumerate(starts):
+            end = starts[i + 1] if i + 1 < len(starts) else len(text)
+            heading = None
+            if self.section_pattern.match(text, start):
+                line = text[start:end].strip().split("\n", 1)[0]
+                heading = line if len(line) <= 80 else line[:77].rstrip() + "..."
+            spans.append((heading, start, end))
+        return spans
+
+    def _paragraph_spans(self, text: str, start: int, end: int) -> list[tuple[int, int]]:
+        """Split at blank lines and at paragraph or clause markers."""
+        boundaries = set()
+        for match in re.finditer(r"\n[ \t]*\n\s*", text[start:end]):
+            # Split at the start of the line that follows the blank line(s).
+            next_text = start + match.end()
+            boundaries.add(text.rfind("\n", 0, next_text) + 1)
+        boundaries.update(m.start() for m in self.PARAGRAPH_PATTERN.finditer(text, start, end))
+        points = [start] + sorted(b for b in boundaries if start < b < end) + [end]
+        return [(a, b) for a, b in zip(points, points[1:], strict=False) if b > a]
+
+    def _sentence_spans(self, text: str, start: int, end: int, limit: int) -> list[tuple[int, int]]:
+        """Split at sentence boundaries; split over-long sentences at whitespace."""
+        points = [start]
+        for match in _SENTENCE_END.finditer(text, start, end):
+            if not _is_abbreviation(text, match.start()):
+                points.append(match.end())
+        points.append(end)
+
+        spans = []
+        for a, b in zip(points, points[1:], strict=False):
+            while b - a > limit:
+                cut = _last_whitespace(text, a, a + limit)
+                spans.append((a, cut))
+                a = cut
+            if b > a:
+                spans.append((a, b))
+        return spans
+
+    # ------------------------------------------------------------------
+    # Packing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _pack(
+        units: list[tuple[int, int, str | None]], limit: int
+    ) -> list[tuple[int, int, str | None]]:
+        """Greedily join consecutive units into chunks of at most limit characters."""
+        packed: list[tuple[int, int, str | None]] = []
+        for start, end, section in units:
+            if packed and end - packed[-1][0] <= limit:
+                packed[-1] = (packed[-1][0], end, packed[-1][2])
+            else:
+                packed.append((start, end, section))
+        return packed
+
+    def _merge_small(
+        self, spans: list[tuple[int, int, str | None]], limit: int
+    ) -> list[tuple[int, int, str | None]]:
+        """Merge chunks below min_chunk_size into a neighbour when that stays near the limit."""
+        min_chars = self.min_chunk_size * CHARS_PER_TOKEN
+        if not min_chars:
+            return spans
+        merged: list[tuple[int, int, str | None]] = []
+        pending: tuple[int, int, str | None] | None = None
+        for start, end, section in spans:
+            if pending is not None:
+                # A small chunk waiting to be merged into this one.
+                if end - pending[0] <= limit + min_chars:
+                    start, section = pending[0], pending[2]
+                else:
+                    merged.append(pending)
+                pending = None
+            if end - start < min_chars:
+                if merged and end - merged[-1][0] <= limit + min_chars:
+                    merged[-1] = (merged[-1][0], end, merged[-1][2])
+                    continue
+                pending = (start, end, section)
+                continue
+            merged.append((start, end, section))
+        if pending is not None:
+            merged.append(pending)
+        return merged
+
+    def _overlap_start(self, text: str, own_start: int, previous_start: int) -> int:
+        """Start the chunk earlier by up to `overlap` tokens, on a word boundary."""
+        target = max(previous_start, own_start - self.overlap * CHARS_PER_TOKEN)
+        if target >= own_start:
+            return own_start
+        if target > 0 and not text[target - 1].isspace():
+            match = re.compile(r"\s").search(text, target, own_start)
+            if match is None:
+                return own_start
+            target = match.end()
+        return target
+
+    def _first_marker(self, text: str, start: int, end: int) -> str | None:
+        """The first paragraph marker at the start of a line in text[start:end]."""
+        line_start = text.rfind("\n", 0, start) + 1
+        for match in self.PARAGRAPH_PATTERN.finditer(text, line_start, end):
+            marker = match.group(0).strip()
+            if match.end() - len(marker) >= start:
+                return marker
+        return None
+
+
+def _is_abbreviation(text: str, period: int) -> bool:
+    """True if the full stop at ``period`` ends an abbreviation or initial."""
+    word_start = period
+    while word_start > 0 and not text[word_start - 1].isspace():
+        word_start -= 1
+    word = text[word_start : period + 1].lstrip("([\"'“‘")
+    if re.fullmatch(r"(?:[A-Za-z]\.)+", word):  # initials and "U.S."
+        return True
+    return word[:-1].lower() in _ABBREVIATIONS
+
+
+def _last_whitespace(text: str, start: int, end: int) -> int:
+    """Position after the last whitespace in text[start:end], or end if there is none."""
+    for i in range(end, start + 1, -1):
+        if text[i - 1].isspace():
+            return i
+    return end
+
+
+def _strip(text: str, start: int, end: int) -> tuple[int, int]:
+    while start < end and text[start].isspace():
+        start += 1
+    while end > start and text[end - 1].isspace():
+        end -= 1
+    return start, end

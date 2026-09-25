@@ -7,19 +7,20 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+# Anchored to the repository root so they never hide package directories.
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
+/build/
+/develop-eggs/
+/dist/
+/downloads/
+/eggs/
+/.eggs/
+/lib/
+/lib64/
+/parts/
+/sdist/
+/var/
+/wheels/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -45,6 +46,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.ruff_cache/
 
 # Translations
 *.mo
@@ -82,16 +84,28 @@ dmypy.json
 *.safetensors
 *.pt
 *.pth
+*.gguf
 checkpoints/
-outputs/
-legal-llm-output/
+wandb/
+/outputs/
+/legal-llm-output/
 
-# Data files
+# Training and evaluation data
+# Legal source documents are often confidential or contain personal data,
+# so data files stay out of version control by default. Directory patterns
+# are anchored to the repository root: an unanchored `data/` once excluded
+# the legalkit/data/ package itself.
+/data/
+/datasets/
 *.jsonl
 *.json
-!pyproject.toml
-data/
-datasets/
+# Small synthetic fixtures that ship with the project are allowed.
+!/examples/**/*.jsonl
+!/examples/**/*.json
+!/tests/**/*.jsonl
+!/tests/**/*.json
+!/legalkit/**/*.jsonl
+!/legalkit/**/*.json
 
 # OS
 .DS_Store
