@@ -54,7 +54,7 @@ def load_legal_corpus(
         if value is not None
     }
 
-    path = Path(source)
+    path = Path(source).expanduser()
     if _exists(path):
         if path.is_dir():
             dataset = LegalDataset.from_directory(path, **defaults)

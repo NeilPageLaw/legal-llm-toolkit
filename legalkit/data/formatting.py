@@ -33,6 +33,7 @@ def to_instruction_format(
         context: Optional supporting text, e.g. the contract or judgment extract.
         template: "alpaca", "chatml", or a custom format string using any of
             the placeholders {instruction}, {context}, {response} and {system}.
+            Without a response, a custom template is cut at {response}.
         system: Optional system message (used by "chatml" and custom templates).
 
     Returns:
@@ -61,6 +62,9 @@ def to_instruction_format(
         return "".join(parts)
 
     if "{instruction}" in template:
+        if response is None:
+            # A prompt ends where the response would start.
+            template = template.split("{response}", 1)[0]
         return template.format(
             instruction=instruction,
             context=context or "",

@@ -144,11 +144,11 @@ dataset = load_legal_corpus("./my_documents/", jurisdiction="uk")   # or a .json
 dataset = dataset.deduplicate()
 dataset.preprocess(anonymise=True)
 chunks = dataset.chunk(chunk_size=512)
-train, val, test = chunks.split(train=0.8, val=0.1, test=0.1, group_by="source")
+train, val, test = chunks.split(train=0.8, val=0.1, test=0.1, group_by="document_id")
 train.to_jsonl("train.jsonl")
 ```
 
-`group_by="source"` keeps every chunk of a document in the same split, so the test set
+`group_by="document_id"` keeps every chunk of a document in the same split, so the test set
 never contains text the model was trained on.
 
 ### Fine-tuning a Model

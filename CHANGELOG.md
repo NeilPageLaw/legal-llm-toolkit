@@ -16,9 +16,10 @@ All notable changes to this project are documented here. The format follows
   the legislation pattern matched ordinary prose; EU joined cases, ECLI, treaty articles and
   US statutes were not recognised.
 - **Anonymisation**: "Mr Smith" and names in capitals ("MR ADAM CARTER") were not anonymised;
-  organisation and address patterns swallowed whole sentences; overlapping matches corrupted
-  the text; company names in preserved case citations were anonymised; the `salt` option was
-  ignored.
+  names in party and signature blocks ("Mr Adam Carter\nClaimant") were skipped as legal
+  terms; organisation and address patterns swallowed whole sentences and merged separate
+  companies; overlapping matches corrupted the text; company names in preserved case
+  citations were anonymised; the `salt` option was ignored.
 - **Chunking**: `chunk_size == overlap` looped forever; clause numbers were deleted and
   paragraphs glued together; chunk offsets were wrong; `min_chunk_size` was ignored.
 - **Evaluation**: citation metrics missed `[1990] 2 AC 605`, `EWCA Civ` and `U.S.` citations;
@@ -34,7 +35,9 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - `LegalDataset` and `LegalSample` with loaders for directories, JSONL, JSON and Hugging Face
-  datasets, and `preprocess`, `chunk`, `deduplicate` and `split(group_by=...)`.
+  datasets, and `preprocess`, `chunk`, `deduplicate` and `split(group_by=...)`. Chunks record a
+  `document_id`, so `split(group_by="document_id")` keeps each document in one split; records
+  are labelled with their file and line (`cases.jsonl#12`).
 - Citation grounding check (`LegalMetrics.evaluate_grounding`) that flags cited authorities
   missing from the source material; ROUGE-L and token F1 metrics; real NER evaluation.
 - Citation offsets, provisions and instruments; `CitationParser.find_case_names`; parallel
@@ -43,8 +46,11 @@ All notable changes to this project are documented here. The format follows
   claim numbers; entity selection; optional spaCy NER or custom detectors.
 - CLI: `anonymise` command, `train --dry-run/--config/--task/--merge`, `evaluate --data`,
   `--version` and `--verbose`.
-- Evaluation test data from a directory of `<task>.jsonl` files; prompt templates, including
-  the model's own chat template, for training and evaluation.
+- Evaluation test data from a directory of `<task>.jsonl` files, checked for missing fields
+  and wrong types before any generation; prompt templates, including the model's own chat
+  template, for training and evaluation.
+- Saved training configs list their `derived_settings`, which are derived again when the
+  config is reused with another method, task or model.
 - GitHub Actions CI (lint, types, tests on Python 3.10-3.13, CPU training tests, build),
   pre-commit hooks, a working quickstart and fictional sample data.
 

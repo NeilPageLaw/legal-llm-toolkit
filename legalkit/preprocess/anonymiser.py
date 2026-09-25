@@ -79,7 +79,9 @@ NER_LABELS = {
 
 def _iban_is_valid(value: str) -> bool:
     """Check an IBAN's mod-97 check digits."""
-    compact = value.replace(" ", "")
+    compact = re.sub(r"\s", "", value)
+    if not compact.isalnum():
+        return False
     rearranged = compact[4:] + compact[:4]
     digits = "".join(str(int(char, 36)) for char in rearranged)
     return int(digits) % 97 == 1
@@ -112,6 +114,12 @@ class _Rule:
 _MONTH = (
     r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?"
     r"|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+)
+# "the 2019 High Court judgment" names a court, not an address.
+_COURT_TYPES = (
+    r"(?:High|Crown|County|Supreme|Magistrates['’]?|Family|Divisional|Commercial|Admiralty|"
+    r"Chancery|Coroners?['’]?|Youth|Circuit|District|Appeals?|Tax|Employment|Upper|Business|"
+    r"Property|Patents)"
 )
 _STREET_TYPES = (
     r"(?:Street|St|Road|Rd|Avenue|Ave|Lane|Ln|Drive|Dr|Court|Ct|Place|Pl|Square|Sq|"
@@ -171,7 +179,12 @@ RULES = (
     ),
     _Rule(
         EntityType.ADDRESS,
-        re.compile(rf"\b\d{{1,4}}[A-Za-z]?,?\s+(?:[A-Z][a-z'’\-]+\s+){{1,3}}{_STREET_TYPES}\b\.?"),
+        re.compile(
+            rf"\b\d{{1,4}}[A-Za-z]?,?\s+(?!{_COURT_TYPES}\s+(?:Courts?|Tribunal)\b)"
+            rf"(?:[A-Z][a-z'’\-]+\s+){{1,3}}{_STREET_TYPES}\b"
+            # Keep an abbreviation's full stop only mid-sentence ("12 High St. and").
+            r"(?:\.(?=\s+[a-z,;]))?"
+        ),
     ),
     _Rule(
         EntityType.ADDRESS,
@@ -216,32 +229,60 @@ _TITLES = (
     "Rev",
     "Revd",
 )
-# A capitalised name ("Smith", "O'Brien", "McDonald", "Smith-Jones") or an initial.
-_NAME_TOKEN = r"(?:(?:[A-Z]['’])?[A-Z][A-Za-z\-]*[a-z]|[A-Z](?:\.|\b(?!['’])))"
-_TITLED_NAME = re.compile(
-    r"\b(?:" + "|".join(sorted(_TITLES, key=len, reverse=True)) + r")\.?\s+"
-    rf"(?P<name>{_NAME_TOKEN}(?:\s+{_NAME_TOKEN}){{0,3}})"
-)
-# Names in capitals, as in the heading of a judgment ("MR ADAM CARTER").
-# Capitals give no word boundaries, so a name stays on one line and stops
-# before words such as "AND" ("MR SMITH AND MRS SMITH" is two names).
-_UPPER_NAME_STOPWORDS = (
-    "AND OR OF THE FOR VS WHO WAS IS HAS HAD SAID AT IN ON TO BY WITH FROM THAT THIS"
-).split()
-_UPPER_NAME_TOKEN = rf"(?!(?:{'|'.join(_UPPER_NAME_STOPWORDS)})\b)[A-Z][A-Z'’\-]*[A-Z]"
-_TITLED_NAME_UPPER = re.compile(
-    r"\b(?i:" + "|".join(sorted(_TITLES, key=len, reverse=True)) + r")\.?[ \t]+"
-    rf"(?P<name>(?:[A-Z]\.?[ \t]+){{0,2}}{_UPPER_NAME_TOKEN}(?:[ \t]+{_UPPER_NAME_TOKEN}){{0,2}})\b"
-)
+_TITLE_ALTERNATION = "|".join(sorted(_TITLES, key=len, reverse=True))
+
+# Words that follow a name without being part of it: headings and labels
+# ("Mr John Smith\nDate: ..."), roles ("Mr Adam Carter\nClaimant"), job
+# titles and legal forms. Legal roles are added from Anonymiser.LEGAL_PRESERVE.
+_NAME_STOPWORDS = frozenset(
+    """
+    the this that these those a an and or but if in on at to for of by with from as is was
+    has had said who vs date dated signed signature address tel telephone email fax mobile
+    re dear yours thank thanks page statement exhibit schedule clause section part paragraph
+    partner director associate secretary manager chairman chair officer consultant clerk
+    trustee trustees executor executors administrator administrators receiver liquidator
+    limited ltd plc llp llc inc company co corporation
+    """.split()
+) | {title.lower() for title in _TITLES}
+
+
+def _titled_name_patterns(role_words: Iterable[str]) -> tuple[re.Pattern, re.Pattern]:
+    """Patterns for titled names in normal case and in capitals."""
+    stopwords = (
+        _NAME_STOPWORDS | {w.lower() for w in role_words} | {f"{w.lower()}s" for w in role_words}
+    )
+    stop = rf"(?!(?i:{'|'.join(sorted(stopwords, key=len, reverse=True))})\b)"
+
+    # A capitalised name ("Smith", "O'Brien", "McDonald", "Smith-Jones") or an initial.
+    token = rf"{stop}(?:(?:[A-Z]['’])?[A-Z][A-Za-z\-]*[a-z]|[A-Z](?:\.|\b(?!['’])))"
+    # A name stays on its line, except that one word may wrap onto the next
+    # line when running text continues after it ("Mr John\nSmith said").
+    wrapped = rf"(?:[ \t]*\n[ \t]*{token}(?=[ \t]+[a-z]|[,.;:)\]'’]))?"
+    titled = re.compile(
+        rf"\b(?:{_TITLE_ALTERNATION})\.?[ \t]+(?P<name>{token}(?:[ \t]+{token}){{0,3}}{wrapped})"
+    )
+
+    # Names in capitals, as in the heading of a judgment ("MR ADAM CARTER").
+    upper_token = rf"{stop}[A-Z][A-Z'’\-]*[A-Z]"
+    upper = re.compile(
+        rf"\b(?i:{_TITLE_ALTERNATION})\.?[ \t]+"
+        rf"(?P<name>(?:[A-Z]\.?[ \t]+){{0,2}}{upper_token}(?:[ \t]+{upper_token}){{0,2}})\b"
+    )
+    return titled, upper
+
 
 _ORG_SUFFIX = (
     r"(?:Limited|LIMITED|Ltd|LTD|PLC|plc|Inc|INC|LLC|LLP|L\.L\.P|Corporation|CORPORATION|"
     r"Corp|CORP|Company|COMPANY|Co|CO|GmbH|AG|SA|S\.A|NV|N\.V|BV|B\.V|SE|LP|L\.P)"
 )
+# A name ends at its first legal form ("Acme Ltd and Beta Ltd" is two
+# companies) and stays on one line.
+_ORG_TOKEN = rf"(?!{_ORG_SUFFIX}\b)(?:[A-Z][\w&'’\-]*|&)"
 _ORG = re.compile(
-    r"\b(?:[A-Z][\w&'’\-]*|&)(?:\s+(?:[A-Z][\w&'’\-]*|&|and|of|the|for|de|du)){0,6}"
+    rf"\b{_ORG_TOKEN}(?:[ \t]+(?:{_ORG_TOKEN}|and|of|the|for|de|du)){{0,6}}"
+    rf"[ \t]+{_ORG_SUFFIX}\b(?:[ \t]+{_ORG_SUFFIX}\b)?"
     # Keep an abbreviation's full stop only mid-sentence ("Acme Ltd. and").
-    rf"\s+{_ORG_SUFFIX}\b(?:\.(?=\s+[a-z,;]))?"
+    r"(?:\.(?=\s+[a-z,;]))?"
 )
 
 # Words that start a sentence or clause, or describe a role, rather than
@@ -378,6 +419,7 @@ class Anonymiser:
 
         self._detector: Detector | None = _spacy_detector(ner) if isinstance(ner, str) else ner
         self._citation_parser = CitationParser()
+        self._name_patterns = _titled_name_patterns(self.LEGAL_PRESERVE)
         self._counters: dict[EntityType, int] = {}
         self._lookup: dict[tuple[EntityType, str], str] = {}
         self._mapping: dict[str, str] = {}
@@ -529,15 +571,13 @@ class Anonymiser:
         return candidates
 
     def _find_person_names(self, text: str) -> list[tuple[int, int]]:
-        """Find titled person names ("Mr Smith", "Dr Jane Doe", "MR ADAM CARTER")."""
-        spans = []
-        for pattern in (_TITLED_NAME, _TITLED_NAME_UPPER):
-            for match in pattern.finditer(text):
-                words = {word.lower().rstrip(".") for word in match["name"].split()}
-                if words & self.LEGAL_PRESERVE:
-                    continue
-                spans.append(match.span())
-        return spans
+        """
+        Find titled person names ("Mr Smith", "Dr Jane Doe", "MR ADAM CARTER").
+
+        Role words end a name ("Mr Adam Carter\nClaimant"), and a title
+        followed by one ("Mr Justice Fraser") is not a name at all.
+        """
+        return [match.span() for pattern in self._name_patterns for match in pattern.finditer(text)]
 
     def _find_organisations(self, text: str) -> list[tuple[int, int]]:
         """Find company names ending in a legal form ("Acme Trading Ltd")."""
@@ -545,11 +585,17 @@ class Anonymiser:
         for match in _ORG.finditer(text):
             tokens = list(re.finditer(r"\S+", match.group(0)))
             words = [t.group(0) for t in tokens]
-            # "Mr Brown and Acme Ltd": the organisation starts after the "and".
-            if any(w.rstrip(".") in self.TITLES for w in words) and "and" in words:
-                first = len(words) - 1 - words[::-1].index("and") + 1
-            else:
-                first = 0
+            first = 0
+            # "Mr Brown and Acme Ltd", "Mr Smith of Acme Ltd": a person comes
+            # first, and the organisation starts after the linking word.
+            titles = [i for i, w in enumerate(words) if w.rstrip(".").title() in self.TITLES]
+            if titles:
+                links = [
+                    i for i, w in enumerate(words) if i > titles[-1] and w in ("and", "of", "&")
+                ]
+                if not links:
+                    continue
+                first = links[-1] + 1
             # Drop sentence starters ("Yesterday Acme Ltd").
             while first < len(words) - 1 and words[first].lower() in _ORG_LEADING_WORDS:
                 first += 1

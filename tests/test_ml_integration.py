@@ -228,3 +228,15 @@ def test_cli_train_and_evaluate(tiny_model, tmp_path, capsys):
     )
     assert code == 0, capsys.readouterr().err
     assert json.loads(results.read_text())["results"][0]["task"] == "contract_qa"
+
+
+def test_benchmark_messages_template_uses_the_chat_template(tiny_model):
+    benchmark = LegalBenchmark(
+        tasks=["contract_qa"],
+        max_samples=1,
+        max_new_tokens=3,
+        prompt_template="messages",
+        show_progress=False,
+    )
+    suite = benchmark.evaluate(model_path=tiny_model)
+    assert suite.results[0].samples_evaluated == 1

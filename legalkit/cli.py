@@ -15,40 +15,17 @@ from pathlib import Path
 from typing import Any
 
 import legalkit
+from legalkit.eval.benchmark import LegalBenchmark
+from legalkit.finetune.config import SUPPORTED_METHODS, SUPPORTED_TASKS
+from legalkit.preprocess.anonymiser import EntityType
+from legalkit.preprocess.citations import SUPPORTED_JURISDICTIONS
 
 REPOSITORY_URL = "https://github.com/NeilPageLaw/legal-llm-toolkit"
-JURISDICTIONS = ("uk", "us", "eu")
-TRAINING_METHODS = ("full", "lora", "qlora")
-TRAINING_TASKS = (
-    "general",
-    "contract_review",
-    "case_analysis",
-    "legal_qa",
-    "document_drafting",
-    "citation_extraction",
-    "summarisation",
-    "clause_classification",
-)
-BENCHMARK_TASKS = (
-    "citation_accuracy",
-    "legal_reasoning",
-    "contract_qa",
-    "case_summarization",
-    "legal_ner",
-    "clause_classification",
-)
-ENTITY_TYPES = (
-    "person",
-    "organisation",
-    "address",
-    "email",
-    "phone",
-    "date",
-    "money",
-    "account_number",
-    "national_id",
-    "case_number",
-)
+JURISDICTIONS = SUPPORTED_JURISDICTIONS
+TRAINING_METHODS = SUPPORTED_METHODS
+TRAINING_TASKS = SUPPORTED_TASKS
+BENCHMARK_TASKS = tuple(LegalBenchmark.AVAILABLE_TASKS)
+ENTITY_TYPES = tuple(entity_type.value for entity_type in EntityType)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -358,7 +335,11 @@ def cmd_train(args) -> int:
     settings: dict[str, Any] = {}
     if args.config:
         settings = json.loads(Path(args.config).read_text(encoding="utf-8"))
-        unknown = sorted(set(settings) - {f.name for f in fields(LegalTrainingConfig)})
+        # Values derived from the saved task, method or model are derived
+        # again, so that options such as --method get matching settings.
+        for name in settings.pop("derived_settings", []):
+            settings.pop(name, None)
+        unknown = sorted(set(settings) - {f.name for f in fields(LegalTrainingConfig) if f.init})
         if unknown:
             raise ValueError(f"Unknown settings in {args.config}: {', '.join(unknown)}")
 

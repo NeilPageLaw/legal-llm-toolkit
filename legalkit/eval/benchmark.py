@@ -237,7 +237,7 @@ class LegalBenchmark:
                 suite.skipped[task] = "no test data provided"
                 logger.warning(f"Skipping {task}: no test data provided")
                 continue
-            if self.max_samples:
+            if self.max_samples is not None:
                 task_data = task_data[: self.max_samples]
             if not task_data:
                 suite.skipped[task] = "no samples"
@@ -262,6 +262,11 @@ class LegalBenchmark:
             model, tokenizer = self._load_model(model_path)
         if model is None or tokenizer is None:
             raise ValueError("Provide model_path, model and tokenizer, or generate_fn")
+        if self.prompt_template == "messages" and not getattr(tokenizer, "chat_template", None):
+            raise ValueError(
+                "prompt_template='messages' needs a tokenizer with a chat template; "
+                "use 'alpaca', 'chatml' or a format string instead"
+            )
 
         def generate(prompt: str) -> str:
             return self._generate(model, tokenizer, prompt)
@@ -579,7 +584,15 @@ class LegalBenchmark:
     def _prompt(
         self, instruction: str, context: str | None = None, plain: str | None = None
     ) -> str:
-        """Build the prompt, in the fine-tuning template when one is set."""
+        """
+        Build the prompt, in the fine-tuning template when one is set.
+
+        With the "messages" template the prompt is the user message; the
+        model's chat template is applied when generating (a custom
+        generate_fn receives the user message).
+        """
+        if self.prompt_template == "messages":
+            return f"{instruction}\n\n{context}" if context else instruction
         if self.prompt_template:
             return to_instruction_format(
                 instruction, context=context or None, template=self.prompt_template
@@ -594,15 +607,24 @@ class LegalBenchmark:
     def _validate(self, task: str, test_data: list[dict]) -> None:
         """Check every record has the fields the task needs, before any generation."""
         for index, record in enumerate(test_data):
+            where = f"{task} record {index}"
             if not isinstance(record, dict):
-                raise ValueError(
-                    f"{task} record {index}: expected an object, got {type(record).__name__}"
-                )
+                raise ValueError(f"{where}: expected an object, got {type(record).__name__}")
             for requirement in TASK_FIELDS[task]["required"]:
                 if not any(record.get(name) is not None for name in requirement.split("|")):
-                    raise ValueError(
-                        f"{task} record {index} is missing {requirement.replace('|', ' or ')!r}"
-                    )
+                    raise ValueError(f"{where} is missing {requirement.replace('|', ' or ')!r}")
+            # A string where a list belongs would be scored letter by letter,
+            # and an empty answer would match every response.
+            for name in ("citations", "answers", "options", "entities"):
+                value = record.get(name)
+                if value is not None and not isinstance(value, list):
+                    raise ValueError(f"{where}: {name!r} must be a list")
+            for name in ("citations", "answers", "options"):
+                values = record.get(name) or []
+                if not all(isinstance(v, str) and tokenize(v) for v in values):
+                    raise ValueError(f"{where}: {name!r} must contain non-empty strings")
+            if task == "contract_qa" and not record["answers"]:
+                raise ValueError(f"{where}: 'answers' must not be empty")
 
     def _load_model(self, model_path: str):
         """Load model and tokenizer."""
@@ -633,7 +655,13 @@ class LegalBenchmark:
         """Generate a response greedily, so results are reproducible."""
         import torch
 
-        encoded = tokenizer(prompt, return_tensors="pt")
+        if self.prompt_template == "messages":
+            chat = [{"role": "user", "content": prompt}]
+            text = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
+            # The chat template already contains any special tokens.
+            encoded = tokenizer(text, return_tensors="pt", add_special_tokens=False)
+        else:
+            encoded = tokenizer(prompt, return_tensors="pt")
         # Some tokenizers also return token_type_ids, which causal LMs reject.
         inputs = {
             key: value.to(model.device)

@@ -292,3 +292,52 @@ class TestBenchmarkSuite:
 
     def test_empty_suite_summary(self):
         assert "RESULTS" in BenchmarkSuite().summary()
+
+
+class TestReviewRegressions:
+    def test_act_cited_through_a_provision_is_grounded(self, metrics):
+        source = "The petition was brought under section 994 of the Companies Act 2006."
+        response = "Relief is available under the Companies Act 2006."
+        assert metrics.evaluate_grounding(response, source)["grounding_rate"] == 1.0
+
+    @pytest.mark.parametrize(
+        "record, message",
+        [
+            ({"question": "q", "answers": [""]}, "non-empty strings"),
+            ({"question": "q", "answers": "12 months"}, "must be a list"),
+            ({"question": "q", "answers": []}, "must not be empty"),
+        ],
+    )
+    def test_malformed_answers_are_rejected(self, record, message):
+        with pytest.raises(ValueError, match=message):
+            LegalBenchmark(tasks=["contract_qa"]).evaluate(
+                generate_fn=lambda p: "I cannot tell", test_data={"contract_qa": [record]}
+            )
+
+    def test_messages_template_passes_the_user_message(self):
+        prompts = []
+        data = {
+            "contract_qa": [
+                {"context": "Term: 1 year.", "question": "Term?", "answers": ["1 year"]}
+            ]
+        }
+        LegalBenchmark(
+            tasks=["contract_qa"], prompt_template="messages", show_progress=False
+        ).evaluate(generate_fn=lambda p: prompts.append(p) or "", test_data=data)
+        assert prompts == ["Term?\n\nTerm: 1 year."]
+
+    def test_custom_template_prompt_stops_at_the_response(self):
+        from legalkit.data import to_instruction_format
+
+        template = "[INST] {instruction}\n{context} [/INST] {response}</s>"
+        assert to_instruction_format("Q", context="C", template=template) == "[INST] Q\nC [/INST] "
+
+    def test_max_samples_zero_evaluates_nothing(self):
+        suite = LegalBenchmark(tasks=["contract_qa"], max_samples=0, show_progress=False).evaluate(
+            generate_fn=echo_answers
+        )
+        assert suite.results == []
+        assert suite.skipped == {"contract_qa": "no samples"}
+
+    def test_structure_detects_firstly(self, metrics):
+        assert metrics.evaluate_quality("Firstly, the duty.")["has_structure"] is True

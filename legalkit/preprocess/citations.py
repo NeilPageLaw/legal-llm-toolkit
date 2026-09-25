@@ -541,16 +541,28 @@ _ACT_NAME_PREPOSITIONS = frozenset(
 
 
 def _clean_party(party: str, first: bool) -> str:
-    """Trim a captured party name; only the first party can start mid-sentence."""
+    """
+    Trim a captured party name; only the first party can start mid-sentence.
+
+    Sentence starters ("In", "See") and lower-case links ("of the") before a
+    name are dropped, but never the last word: in "A v B" the "A" is the
+    party, and capitalised particles ("Von Hannover", "De Keyser") are kept.
+    """
     tokens = party.split()
     if first:
-        while tokens and (
-            tokens[0].lower().rstrip(",") in _LEADING_STOPWORDS or tokens[0].lower() in _LINK_WORDS
+        while len(tokens) > 1 and (
+            tokens[0].lower().rstrip(",") in _LEADING_STOPWORDS or tokens[0] in _LINK_WORDS
         ):
             tokens.pop(0)
-    while tokens and tokens[-1].lower() in _DANGLING_LINKS:
+    while tokens and tokens[-1] in _DANGLING_LINKS:
         tokens.pop()
     return " ".join(tokens)
+
+
+def _name_start(match: re.Match, name: str) -> int:
+    """Offset of a cleaned name, whose words end the match's "name" group."""
+    words = list(re.finditer(r"\S+", match["name"]))
+    return match.start("name") + words[-len(name.split())].start()
 
 
 def _clean_act_name(name: str) -> str:
@@ -841,7 +853,7 @@ class CitationParser:
                 instrument = f"{name} {match['year']}" if match["year"] else name
                 name_start = None
                 if pattern is UK_LEGISLATION_TRAILING:
-                    name_start = match.end("name") - len(name)
+                    name_start = _name_start(match, name)
                 yield self._legislation(
                     match,
                     text,
@@ -865,7 +877,7 @@ class CitationParser:
                 instrument=instrument,
                 year=match["year"],
                 normalised=instrument,
-                name_start=match.end("name") - len(name),
+                name_start=_name_start(match, name),
             )
 
     def _uk_cpr(self, text: str) -> Iterator[Citation]:

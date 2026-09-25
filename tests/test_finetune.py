@@ -161,3 +161,39 @@ class TestLegalTrainerWithoutModels:
 
         with pytest.raises(ValueError, match="empty"):
             LegalTrainer(LegalTrainingConfig())._prepare_dataset(LegalDataset())
+
+
+class TestSavedConfigReuse:
+    """Regressions from review: reusing a saved training_config.json."""
+
+    def test_derived_settings_are_recorded(self):
+        config = LegalTrainingConfig(task="contract_review", num_epochs=2)
+        assert "num_epochs" not in config.derived_settings
+        assert {"max_seq_length", "use_4bit", "optim", "lora_target_modules"} <= set(
+            config.derived_settings
+        )
+        assert config.to_dict()["derived_settings"] == list(config.derived_settings)
+
+    def test_reuse_with_another_method_model_or_task(self):
+        saved = LegalTrainingConfig(method="qlora").to_dict()
+        lora = LegalTrainingConfig.from_dict({**saved, "method": "lora"})
+        assert lora.use_4bit is False
+        assert lora.optim == "adamw_torch"
+        gpt2 = LegalTrainingConfig.from_dict({**saved, "base_model": "gpt2"})
+        assert gpt2.lora_target_modules == ["c_attn", "c_proj", "c_fc"]
+        contracts = LegalTrainingConfig.from_dict({**saved, "task": "contract_review"})
+        assert (contracts.num_epochs, contracts.max_seq_length) == (5, 4096)
+
+    def test_explicit_values_survive_reuse(self):
+        saved = LegalTrainingConfig(num_epochs=7, optim="adamw_torch").to_dict()
+        reloaded = LegalTrainingConfig.from_dict({**saved, "task": "contract_review"})
+        assert reloaded.num_epochs == 7
+        assert reloaded.optim == "adamw_torch"
+
+
+def test_full_fine_tuning_keeps_float32_weights():
+    torch = pytest.importorskip("torch")
+    trainer = LegalTrainer(LegalTrainingConfig(method="full", fp16=True, bf16=False))
+    assert trainer._torch_dtype(torch) is torch.float32
+    lora = LegalTrainer(LegalTrainingConfig(method="lora", fp16=True, bf16=False))
+    assert lora._torch_dtype(torch) is torch.float16

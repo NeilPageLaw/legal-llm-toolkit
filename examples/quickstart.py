@@ -96,7 +96,7 @@ def demo_dataset():
         print(f"    {key}: {value}")
 
     chunked = dataset.chunk(chunk_size=128)
-    train, val, test = chunked.split(train=0.8, val=0.1, test=0.1, seed=42, group_by="source")
+    train, val, test = chunked.split(train=0.8, val=0.1, test=0.1, seed=42, group_by="document_id")
     print(f"\n  After chunking: {len(chunked)} samples")
     print(f"  Split (chunks of one document stay together): {len(train)}/{len(val)}/{len(test)}")
 

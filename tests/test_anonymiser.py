@@ -249,3 +249,57 @@ class TestNamedEntityDetector:
 
         result = Anonymiser(ner=str(tmp_path / "model")).anonymise("Signed, Jane Smith")
         assert result.text == "Signed, [PERSON_1]"
+
+
+class TestLayouts:
+    """Regressions from review: layouts common in legal documents."""
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            (
+                "BETWEEN:\nMr Adam Carter\nClaimant\nand\nACME TRADING LIMITED\nDefendant",
+                "BETWEEN:\n[PERSON_1]\nClaimant\nand\n[ORGANISATION_1]\nDefendant",
+            ),
+            (
+                "Signed: Mr John Smith\nSolicitor for the Claimant",
+                "Signed: [PERSON_1]\nSolicitor for the Claimant",
+            ),
+            (
+                "Exhibit 3: Mrs Jane Jones Witness Statement",
+                "Exhibit 3: [PERSON_1] Witness Statement",
+            ),
+            ("Witness: Mr John Smith\nDate: 1 May 2020", "Witness: [PERSON_1]\nDate: [DATE_1]"),
+            ("Mr John Smith\nThe court held that", "[PERSON_1]\nThe court held that"),
+            ("the evidence of Mr John\nSmith, who said", "the evidence of [PERSON_1], who said"),
+            ("MR JOHN SMITH SOLICITOR", "[PERSON_1] SOLICITOR"),
+        ],
+    )
+    def test_names_stop_at_roles_labels_and_line_ends(self, text, expected):
+        assert anonymised(text) == expected
+
+    def test_separate_companies_stay_separate(self):
+        text = "Acme Trading Ltd and Beta Services Ltd entered into the Agreement."
+        assert (
+            anonymised(text) == "[ORGANISATION_1] and [ORGANISATION_2] entered into the Agreement."
+        )
+        block = "ACME TRADING LIMITED\nClaimant\nand\nBETA SERVICES LIMITED\nDefendant"
+        assert anonymised(block) == "[ORGANISATION_1]\nClaimant\nand\n[ORGANISATION_2]\nDefendant"
+
+    def test_person_of_company(self):
+        assert anonymised("Mr Smith of Acme Holdings Ltd wrote.") == (
+            "[PERSON_1] of [ORGANISATION_1] wrote."
+        )
+
+    def test_court_names_are_not_addresses(self):
+        text = "In 2019 High Court proceedings were issued before 5 Crown Court judges."
+        assert anonymised(text) == text
+        assert anonymised("She lives at 12 Maple Court.") == "She lives at [ADDRESS_1]."
+
+    def test_wrapped_iban_does_not_crash(self):
+        text = "IBAN GB82 WEST 1234\n5698 7654 32 or GB82\tWEST 1234 5698 7654 32"
+        assert anonymised(text) == "IBAN [ACCOUNT_NUMBER_1] or [ACCOUNT_NUMBER_1]"
+
+    def test_sentence_full_stops_are_kept(self):
+        assert anonymised("Send it to 12 High St. and wait.") == "Send it to [ADDRESS_1] and wait."
+        assert anonymised("It went to 12 High St.") == "It went to [ADDRESS_1]."

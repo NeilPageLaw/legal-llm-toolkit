@@ -337,8 +337,14 @@ class LegalMetrics:
             sources = [sources]
         known: set[str] = set()
         for source in sources:
-            known.update(self.extract_citations(source, include_legislation=True))
-            known.add(self._canonical(source))
+            for citation in self.parser.parse(source):
+                known.add(citation.normalised or citation.raw)
+                # A source citing "section 994 of the Companies Act 2006" also
+                # supports a response citing the Act itself.
+                if citation.instrument:
+                    known.add(citation.instrument)
+            if len(source) <= 300:  # a bare citation the parser may not recognise
+                known.add(re.sub(r"\s+", " ", source).strip())
 
         cited = self.extract_citations(response, include_legislation)
         grounded = [c for c in cited if c in known]
@@ -440,7 +446,7 @@ class LegalMetrics:
             r"\n\d+\.",  # Numbered lists
             r"\n[•\-\*]",  # Bullet points
             r"\n[A-Z][^.]*:",  # Headers
-            r"First[ly]?,|Second[ly]?,|Third[ly]?,",  # Sequence words
+            r"\b(?:First|Second|Third)(?:ly)?,",  # Sequence words
             r"In conclusion|To summarize|To summarise",  # Conclusions
         ]
         return any(re.search(pattern, text) for pattern in structure_indicators)

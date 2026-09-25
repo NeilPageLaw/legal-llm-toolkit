@@ -370,3 +370,29 @@ class TestParserBehaviour:
         start = time.perf_counter()
         assert len(parser.parse(text)) == 1
         assert time.perf_counter() - start < 10
+
+
+class TestReviewRegressions:
+    @pytest.mark.parametrize(
+        "text, parties",
+        [
+            ("A v B plc [2002] EWCA Civ 337", "A v B plc"),
+            ("See A v B plc [2002] EWCA Civ 337", "A v B plc"),
+            ("Von Hannover v Germany (2005) 40 EHRR 1", "Von Hannover v Germany"),
+            ("De Keyser v Jones [1920] AC 508", "De Keyser v Jones"),
+        ],
+    )
+    def test_short_parties_and_particles_are_kept(self, parser, text, parties):
+        assert only(parser, text).parties == parties
+
+    @pytest.mark.parametrize(
+        "text, raw",
+        [
+            ("relied on the Human Rights\n    Act 1998", "Human Rights\n    Act 1998"),
+            ("Human  Rights Act 1998, s 3 applies", "Human  Rights Act 1998, s 3"),
+        ],
+    )
+    def test_act_offsets_survive_irregular_whitespace(self, parser, text, raw):
+        citation = only(parser, text)
+        assert citation.raw == raw
+        assert text[citation.start : citation.end] == raw

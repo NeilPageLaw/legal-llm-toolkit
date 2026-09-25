@@ -11,6 +11,7 @@ from typing import Any
 from legalkit.data.dataset import LegalDataset
 from legalkit.data.loaders import load_legal_corpus
 from legalkit.finetune.config import FinetuneMethod, LegalTrainingConfig
+from legalkit.preprocess.chunker import CHARS_PER_TOKEN
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +207,14 @@ class LegalTrainer:
 
         if not len(legal_dataset):
             raise ValueError("The training dataset is empty")
+        max_chars = (self.config.max_seq_length or 0) * CHARS_PER_TOKEN
+        too_long = sum(1 for s in legal_dataset if not s.is_instruction and len(s.text) > max_chars)
+        if too_long:
+            logger.warning(
+                f"{too_long} documents are longer than max_seq_length "
+                f"({self.config.max_seq_length} tokens) and will be truncated. "
+                "Split them first with LegalDataset.chunk()."
+            )
         if self.config.anonymise_training_data:
             legal_dataset.preprocess(
                 anonymise=True,
@@ -293,6 +302,10 @@ class LegalTrainer:
         return SFTTrainer(**trainer_kwargs)
 
     def _torch_dtype(self, torch):
+        # Full fine-tuning keeps float32 master weights and lets mixed precision
+        # handle the 16-bit compute: float16 weights cannot be unscaled.
+        if self.config.method == FinetuneMethod.FULL.value:
+            return torch.float32
         if self.config.bf16:
             return torch.bfloat16
         if self.config.fp16:

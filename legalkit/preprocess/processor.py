@@ -24,7 +24,14 @@ _PAGE_X_OF_Y_LINE = re.compile(
 
 @dataclass
 class ProcessedDocument:
-    """Result of processing a legal document."""
+    """
+    Result of processing a legal document.
+
+    Citation offsets (``start``/``end``) refer to the text after whitespace
+    normalisation and header removal, before citations are normalised and
+    personal data replaced. Use ``CitationParser().parse(result.processed)``
+    for offsets into the processed text.
+    """
 
     original: str
     processed: str

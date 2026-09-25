@@ -8,6 +8,7 @@ instruction tuning), where ``text`` holds the supporting document.
 
 import hashlib
 import json
+import logging
 import random
 import re
 from collections import Counter
@@ -20,9 +21,12 @@ from legalkit.data.formatting import to_instruction_format
 from legalkit.preprocess.chunker import LegalChunker
 from legalkit.preprocess.processor import LegalPreprocessor
 
+logger = logging.getLogger(__name__)
+
 # Field names accepted when reading records, in order of preference. They
 # cover the common Alpaca, prompt/completion and question/answer layouts.
 TEXT_KEYS = ("text", "input", "context", "document", "content", "body")
+CONTEXT_KEYS = ("input", "context", "document", "content", "body", "text")
 INSTRUCTION_KEYS = ("instruction", "prompt", "question", "query")
 RESPONSE_KEYS = ("response", "output", "answer", "completion", "target")
 
@@ -121,9 +125,12 @@ class LegalSample:
         document_type, jurisdiction or source when the record lacks them.
         """
         record = dict(record)
-        text = _as_text(_pop_first(record, TEXT_KEYS))
         instruction = _pop_first(record, INSTRUCTION_KEYS)
         response = _pop_first(record, RESPONSE_KEYS)
+        # In instruction data a "text" column is often the fully rendered
+        # prompt and answer; the context is "input" (kept in metadata otherwise).
+        text_keys = CONTEXT_KEYS if instruction is not None else TEXT_KEYS
+        text = _as_text(_pop_first(record, text_keys))
         document_type = record.pop("document_type", None) or defaults.get("document_type")
         jurisdiction = record.pop("jurisdiction", None) or defaults.get("jurisdiction")
         source = record.pop("source", None) or defaults.get("source")
@@ -194,34 +201,34 @@ class LegalDataset:
         """
         Load a JSON Lines file, one record per line.
 
+        Records without a source are labelled with the file and line number,
+        e.g. "cases.jsonl#12".
+
         Raises:
             ValueError: If a line is not a JSON object.
         """
         path = Path(path)
-        records = []
-        with path.open(encoding="utf-8") as f:
-            for line_number, line in enumerate(f, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as e:
-                    raise ValueError(f"{path}:{line_number}: invalid JSON ({e.msg})") from e
-                if not isinstance(record, dict):
-                    raise ValueError(f"{path}:{line_number}: expected a JSON object")
-                records.append(record)
-        return cls.from_records(records, **defaults)
+        return cls._from_numbered_records(_read_jsonl(path), path.name, defaults)
 
     @classmethod
     def from_json(cls, path: str | Path, **defaults: Any) -> "LegalDataset":
-        """Load a JSON file holding a list of records, or {"data": [...]}."""
+        """
+        Load a JSON file holding a list of records, or {"data": [...]}.
+
+        Records without a source are labelled with the file and position,
+        e.g. "cases.json#3".
+        """
         path = Path(path)
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and isinstance(data.get("data"), list):
-            data = data["data"]
-        if not isinstance(data, list) or not all(isinstance(r, dict) for r in data):
-            raise ValueError(f"{path}: expected a list of JSON objects")
-        return cls.from_records(data, **defaults)
+        return cls._from_numbered_records(_read_json(path), path.name, defaults)
+
+    @classmethod
+    def _from_numbered_records(
+        cls, records: Iterable[tuple[int, dict[str, Any]]], label: str, defaults: dict[str, Any]
+    ) -> "LegalDataset":
+        return cls(
+            LegalSample.from_dict(record, **{"source": f"{label}#{number}", **defaults})
+            for number, record in records
+        )
 
     @classmethod
     def from_directory(
@@ -262,19 +269,21 @@ class LegalDataset:
             if suffix not in wanted:
                 continue
 
-            file_defaults = {"source": relative.as_posix(), **defaults}
+            file_defaults = dict(defaults)
             if "document_type" not in defaults:
                 inferred = _document_type_from_path(relative)
                 if inferred:
                     file_defaults["document_type"] = inferred
 
+            label = relative.as_posix()
             if suffix in TEXT_EXTENSIONS:
                 text = file.read_text(encoding=encoding)
-                dataset.append(LegalSample.from_dict({"text": text}, **file_defaults))
+                record = {"text": text}
+                dataset.append(LegalSample.from_dict(record, **{"source": label, **file_defaults}))
             elif suffix == ".jsonl":
-                dataset.extend(cls.from_jsonl(file, **file_defaults))
+                dataset.extend(cls._from_numbered_records(_read_jsonl(file), label, file_defaults))
             elif suffix == ".json":
-                dataset.extend(cls.from_json(file, **file_defaults))
+                dataset.extend(cls._from_numbered_records(_read_json(file), label, file_defaults))
         return dataset
 
     @classmethod
@@ -295,7 +304,8 @@ class LegalDataset:
             **defaults: document_type, jurisdiction or source for every sample.
         """
         dataset = cls()
-        for row in hf_dataset:
+        skipped = 0
+        for index, row in enumerate(hf_dataset):
             if limit is not None and len(dataset) >= limit:
                 break
             record = dict(row)
@@ -303,13 +313,17 @@ class LegalDataset:
                 if text_field not in record:
                     raise KeyError(f"Column {text_field!r} not found. Available: {sorted(record)}")
                 record["text"] = record.pop(text_field)
+            elif index == 0 and not any(k in record for k in TEXT_KEYS + INSTRUCTION_KEYS):
+                raise ValueError(
+                    f"Could not find a text column. Pass text_field= one of {sorted(record)}"
+                )
             sample = LegalSample.from_dict(record, **defaults)
             if not sample.text and not sample.instruction:
-                raise ValueError(
-                    "Could not find a text column. Pass text_field= one of "
-                    f"{sorted(sample.metadata)}"
-                )
+                skipped += 1
+                continue
             dataset.append(sample)
+        if skipped:
+            logger.warning(f"Skipped {skipped} rows with no text")
         return dataset
 
     # ------------------------------------------------------------------
@@ -420,7 +434,9 @@ class LegalDataset:
 
         Instruction samples are passed through unchanged. Each chunk records
         its position in ``metadata`` (chunk_index, chunk_count, start_char,
-        end_char, section).
+        end_char, section) and the document it came from (document_id), so
+        ``split(group_by="document_id")`` keeps every chunk of a document in
+        the same split.
 
         Returns:
             A new LegalDataset.
@@ -432,14 +448,16 @@ class LegalDataset:
             min_chunk_size=min_chunk_size,
         )
         chunked = LegalDataset()
-        for sample in self.samples:
+        for position, sample in enumerate(self.samples):
             if sample.is_instruction or not sample.text:
                 chunked.append(sample)
                 continue
+            document_id = sample.metadata.get("document_id") or f"{sample.source or ''}#{position}"
             pieces = chunker.chunk_with_metadata(sample.text)
             for index, piece in enumerate(pieces):
                 metadata = {
                     **sample.metadata,
+                    "document_id": document_id,
                     "chunk_index": index,
                     "chunk_count": len(pieces),
                     "start_char": piece.start_char,
@@ -551,6 +569,33 @@ class LegalDataset:
             "document_types": dict(Counter(s.document_type for s in self.samples)),
             "jurisdictions": dict(Counter(s.jurisdiction or "unknown" for s in self.samples)),
         }
+
+
+def _read_jsonl(path: Path) -> list[tuple[int, dict[str, Any]]]:
+    """Records of a JSON Lines file with their line numbers."""
+    records = []
+    with path.open(encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{path}:{line_number}: invalid JSON ({e.msg})") from e
+            if not isinstance(record, dict):
+                raise ValueError(f"{path}:{line_number}: expected a JSON object")
+            records.append((line_number, record))
+    return records
+
+
+def _read_json(path: Path) -> list[tuple[int, dict[str, Any]]]:
+    """Records of a JSON file (a list, or {"data": [...]}) numbered from 1."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        data = data["data"]
+    if not isinstance(data, list) or not all(isinstance(r, dict) for r in data):
+        raise ValueError(f"{path}: expected a list of JSON objects")
+    return list(enumerate(data, start=1))
 
 
 def _pop_first(record: dict[str, Any], keys: Iterable[str]) -> Any:

@@ -131,6 +131,10 @@ class LegalTrainingConfig:
     preserve_citations: bool = True  # keep case names in citations when anonymising
     anonymise_training_data: bool = False
 
+    # Names of the settings above that were filled in from the task, method
+    # or model rather than set explicitly.
+    derived_settings: tuple[str, ...] = field(default=(), init=False, repr=False, compare=False)
+
     def __post_init__(self):
         """Validate settings and fill in task and method defaults."""
         self.method = self.method.lower()
@@ -149,30 +153,30 @@ class LegalTrainingConfig:
                 f"Choose one of: {', '.join(SUPPORTED_JURISDICTIONS)}"
             )
 
-        defaults = {**GENERAL_DEFAULTS, **TASK_DEFAULTS.get(self.task, {})}
-        if self.num_epochs is None:
-            self.num_epochs = defaults["num_epochs"]
-        if self.max_seq_length is None:
-            self.max_seq_length = defaults["max_seq_length"]
-
-        if self.use_4bit is None:
-            self.use_4bit = self.method == FinetuneMethod.QLORA.value
-        elif self.use_4bit and self.method != FinetuneMethod.QLORA.value:
+        if self.use_4bit and self.method != FinetuneMethod.QLORA.value:
             raise ValueError("4-bit loading is QLoRA: set method='qlora' instead of use_4bit=True")
-
         if self.fp16 and self.bf16:
             raise ValueError("Set at most one of fp16 and bf16")
-        if self.bnb_4bit_compute_dtype is None:
-            self.bnb_4bit_compute_dtype = "bfloat16" if self.bf16 else "float16"
-        if self.optim is None:
-            self.optim = (
+
+        from legalkit.finetune.adapters import get_target_modules_for_model
+
+        task_defaults = {**GENERAL_DEFAULTS, **TASK_DEFAULTS.get(self.task, {})}
+        derived = {
+            "num_epochs": lambda: task_defaults["num_epochs"],
+            "max_seq_length": lambda: task_defaults["max_seq_length"],
+            "use_4bit": lambda: self.method == FinetuneMethod.QLORA.value,
+            "bnb_4bit_compute_dtype": lambda: "bfloat16" if self.bf16 else "float16",
+            "optim": lambda: (
                 "paged_adamw_32bit" if self.method == FinetuneMethod.QLORA.value else "adamw_torch"
-            )
-
-        if self.lora_target_modules is None:
-            from legalkit.finetune.adapters import get_target_modules_for_model
-
-            self.lora_target_modules = get_target_modules_for_model(self.base_model)
+            ),
+            "lora_target_modules": lambda: get_target_modules_for_model(self.base_model),
+        }
+        filled = []
+        for name, default in derived.items():
+            if getattr(self, name) is None:
+                setattr(self, name, default())
+                filled.append(name)
+        self.derived_settings = tuple(filled)
 
         for name in ("num_epochs", "batch_size", "gradient_accumulation_steps", "max_seq_length"):
             if getattr(self, name) < 1:
@@ -192,15 +196,28 @@ class LegalTrainingConfig:
         Convert config to dictionary.
 
         Every setting is included, so a saved config records exactly how a
-        model was trained. The Hub token is never included.
+        model was trained, with the names of settings derived from the task,
+        method or model under "derived_settings". The Hub token is never
+        included.
         """
-        return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "hub_token"}
+        record = {
+            f.name: getattr(self, f.name) for f in fields(self) if f.init and f.name != "hub_token"
+        }
+        record["derived_settings"] = list(self.derived_settings)
+        return record
 
     @classmethod
     def from_dict(cls, config_dict: dict[str, Any]) -> "LegalTrainingConfig":
-        """Create config from dictionary, ignoring unknown keys."""
-        names = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in config_dict.items() if k in names})
+        """
+        Create config from dictionary, ignoring unknown keys.
+
+        Settings listed under "derived_settings" are derived again rather than
+        copied, so a saved config reused with another method, task or model
+        gets matching values.
+        """
+        names = {f.name for f in fields(cls) if f.init}
+        derived = set(config_dict.get("derived_settings", []))
+        return cls(**{k: v for k, v in config_dict.items() if k in names and k not in derived})
 
     def save(self, path: str | Path):
         """Save config to JSON file."""

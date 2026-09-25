@@ -155,6 +155,34 @@ class TestLegalDatasetLoading:
         with pytest.raises(ValueError, match="text_field"):
             LegalDataset.from_huggingface([{"label": 1}])
 
+    def test_from_huggingface_skips_empty_rows(self):
+        rows = [{"text": "A judgment."}, {"text": ""}, {"text": "Another."}]
+        assert [s.text for s in LegalDataset.from_huggingface(rows, text_field="text")] == [
+            "A judgment.",
+            "Another.",
+        ]
+
+    def test_records_get_line_level_sources(self, tmp_path):
+        path = tmp_path / "cases.jsonl"
+        path.write_text('{"text": "a"}\n\n{"text": "b", "source": "manual"}\n{"text": "c"}\n')
+        assert [s.source for s in LegalDataset.from_jsonl(path)] == [
+            "cases.jsonl#1",
+            "manual",
+            "cases.jsonl#4",
+        ]
+
+    def test_alpaca_records_use_input_not_rendered_text(self):
+        sample = LegalSample.from_dict(
+            {
+                "instruction": "Name the governing law.",
+                "input": "Governed by the law of England.",
+                "output": "English law.",
+                "text": "### Instruction: ... ### Response: English law.",
+            }
+        )
+        assert sample.text == "Governed by the law of England."
+        assert "Response" in sample.metadata["text"]
+
 
 class TestLoadLegalCorpus:
     def test_directory(self, corpus_dir):
@@ -167,6 +195,10 @@ class TestLoadLegalCorpus:
 
     def test_limit(self, corpus_dir):
         assert len(load_legal_corpus(corpus_dir / "qa.jsonl", limit=1)) == 1
+
+    def test_home_directory_is_expanded(self, corpus_dir, monkeypatch):
+        monkeypatch.setenv("HOME", str(corpus_dir))
+        assert len(load_legal_corpus("~/qa.jsonl")) == 2
 
     def test_missing_local_file(self, tmp_path):
         with pytest.raises(FileNotFoundError):
@@ -238,6 +270,20 @@ class TestLegalDatasetOperations:
         ]
         train, val, test = LegalDataset(samples).split(0.5, 0.25, 0.25, group_by="source")
         assert sorted([len(train), len(val), len(test)]) == [4, 4, 6]
+
+    def test_chunks_of_a_document_stay_in_one_split(self):
+        # No sources at all: chunks are still grouped by their document.
+        documents = [f"{i}. " + "The tenant shall pay the rent. " * 40 for i in range(10)]
+        chunked = LegalDataset.from_texts(documents).chunk(chunk_size=64, overlap=0)
+        assert len(chunked) > 20
+        splits = chunked.split(0.6, 0.2, 0.2, group_by="document_id")
+        homes = {}
+        for split_index, split_ in enumerate(splits):
+            for sample in split_:
+                homes.setdefault(sample.metadata["document_id"], set()).add(split_index)
+        assert len(homes) == 10
+        assert all(len(found_in) == 1 for found_in in homes.values())
+        assert all(len(split_) for split_ in splits)
 
     def test_split_never_uses_a_zero_fraction(self):
         dataset = LegalDataset.from_texts([str(i) for i in range(7)])

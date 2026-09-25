@@ -197,3 +197,15 @@ def test_package_imports_without_ml_libraries():
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     assert result.stdout.strip() == "[]"
+
+
+def test_saved_config_can_be_reused_with_another_method(tmp_path, capsys):
+    from legalkit.finetune import LegalTrainingConfig
+
+    config = tmp_path / "training_config.json"
+    LegalTrainingConfig(method="qlora").save(config)
+    code = main(["train", "data.jsonl", "--config", str(config), "--method", "lora", "--dry-run"])
+    assert code == 0, capsys.readouterr().err
+    out = capsys.readouterr().out
+    settings = json.loads(out[out.index("{") : out.rindex("}") + 1])
+    assert settings["use_4bit"] is False
