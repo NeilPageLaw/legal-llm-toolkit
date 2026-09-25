@@ -15,12 +15,12 @@ from pathlib import Path
 from typing import Any
 
 import legalkit
+from legalkit._install import REPOSITORY_URL, install_command
 from legalkit.eval.benchmark import LegalBenchmark
 from legalkit.finetune.config import SUPPORTED_METHODS, SUPPORTED_TASKS
 from legalkit.preprocess.anonymiser import EntityType
 from legalkit.preprocess.citations import SUPPORTED_JURISDICTIONS
 
-REPOSITORY_URL = "https://github.com/NeilPageLaw/legal-llm-toolkit"
 JURISDICTIONS = SUPPORTED_JURISDICTIONS
 TRAINING_METHODS = SUPPORTED_METHODS
 TRAINING_TASKS = SUPPORTED_TASKS
@@ -453,7 +453,7 @@ Commands:
   legalkit train       - Fine-tune a legal LLM
   legalkit evaluate    - Evaluate a legal LLM
 
-Optional dependencies (pip install 'legal-llm-toolkit[<extra>]'):
+Optional dependencies ({install_command("<extra>")}):
 {chr(10).join(installed)}
 
 Documentation: {REPOSITORY_URL}

@@ -5,6 +5,8 @@ Adapter configurations for LoRA and QLoRA fine-tuning.
 import re
 from typing import TYPE_CHECKING, Any
 
+from legalkit._install import install_command
+
 if TYPE_CHECKING:
     from legalkit.finetune.config import LegalTrainingConfig
 
@@ -24,9 +26,7 @@ def create_lora_config(config: "LegalTrainingConfig"):
     try:
         from peft import LoraConfig, TaskType
     except ImportError as e:
-        raise ImportError(
-            "Install the training extras: pip install 'legal-llm-toolkit[train]'"
-        ) from e
+        raise ImportError(f"Install the training extras: {install_command('train')}") from e
 
     return LoraConfig(
         r=config.lora_r,
@@ -53,7 +53,7 @@ def create_qlora_config(config: "LegalTrainingConfig", compute_dtype: str | None
         import torch
         from transformers import BitsAndBytesConfig
     except ImportError as e:
-        raise ImportError("Install the QLoRA extras: pip install 'legal-llm-toolkit[qlora]'") from e
+        raise ImportError(f"Install the QLoRA extras: {install_command('qlora')}") from e
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,

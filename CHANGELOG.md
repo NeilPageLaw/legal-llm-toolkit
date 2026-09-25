@@ -81,6 +81,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- Install hints in error messages, the CLI and the quickstart include the GitHub URL. The
+  toolkit is not published on PyPI, and installing it by name alone would fetch another
+  publisher's package.
 - `trust_remote_code` is off by default for training and evaluation.
 - Models pushed to the Hugging Face Hub from the trainer are private by default, and the Hub
   token no longer appears in `repr()` or saved configs.
